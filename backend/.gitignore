@@ -30,3 +30,5 @@ Thumbs.db
 
 # Logs
 *.log
+naarira_ai_backup.dump
+*.dump
