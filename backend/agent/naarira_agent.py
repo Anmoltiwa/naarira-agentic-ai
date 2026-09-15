@@ -524,115 +524,160 @@ def _extract_json_objects(text: str) -> list[dict]:
 
 def extract_response(result: Any) -> str:
     """
-    Extract readable text from LangGraph agent result.
+    Safely extract the final assistant text from a
+    LangGraph agent result without recursive self-calls.
     """
 
     if result is None:
         return ""
 
-    # --------------------------------------------------------
-    # Dictionary result
-    # --------------------------------------------------------
-
+    # LangGraph state dictionary
     if isinstance(result, dict):
 
-        # Common LangGraph format
-        messages = result.get(
-            "messages"
-        )
+        messages = result.get("messages")
 
         if messages:
+            return extract_response_from_messages(messages)
 
-            return extract_response(
-                {
-                    "messages": messages
-                }
-            )
-
-        # Direct answer
         for key in (
             "answer",
             "output",
             "response",
             "content",
         ):
-
             value = result.get(key)
 
-            if isinstance(value, str):
-                return value
-
-        return str(result)
-
-    # --------------------------------------------------------
-    # Message list
-    # --------------------------------------------------------
-
-    if isinstance(result, list):
-
-        # Search backwards for final assistant message
-        for message in reversed(result):
-
-            if isinstance(message, dict):
-
-                content = message.get(
-                    "content"
-                )
-
-                if isinstance(content, str):
-
-                    return content
-
-                if isinstance(content, list):
-
-                    parts = []
-
-                    for item in content:
-
-                        if isinstance(item, dict):
-
-                            text = item.get(
-                                "text"
-                            )
-
-                            if text:
-                                parts.append(
-                                    text
-                                )
-
-                    if parts:
-
-                        return "\n".join(parts)
-
-            else:
-
-                content = getattr(
-                    message,
-                    "content",
-                    None,
-                )
-
-                if isinstance(content, str):
-
-                    return content
+            if isinstance(value, str) and value.strip():
+                return value.strip()
 
         return ""
 
-    # --------------------------------------------------------
-    # Object with content
-    # --------------------------------------------------------
+    # List of messages
+    if isinstance(result, list):
+        return extract_response_from_messages(result)
 
+    # Single LangChain message object
     content = getattr(
         result,
         "content",
         None,
     )
 
-    if isinstance(content, str):
-        return content
+    if content is not None:
+        return normalize_message_content(content)
 
     return str(result)
 
+
+def extract_response_from_messages(
+    messages: list[Any],
+) -> str:
+    """
+    Extract the last meaningful assistant/model message.
+    """
+
+    if not messages:
+        return ""
+
+    for message in reversed(messages):
+
+        # Dictionary message
+        if isinstance(message, dict):
+
+            role = str(
+                message.get("role")
+                or message.get("type")
+                or ""
+            ).lower()
+
+            # Ignore tool messages
+            if role in {
+                "tool",
+                "function",
+            }:
+                continue
+
+            content = message.get("content")
+
+            text = normalize_message_content(
+                content
+            )
+
+            if text:
+                return text
+
+            continue
+
+        # LangChain message object
+        message_type = str(
+            getattr(
+                message,
+                "type",
+                "",
+            )
+            or ""
+        ).lower()
+
+        if message_type in {
+            "tool",
+            "function",
+        }:
+            continue
+
+        content = getattr(
+            message,
+            "content",
+            None,
+        )
+
+        text = normalize_message_content(
+            content
+        )
+
+        if text:
+            return text
+
+    return ""
+
+
+def normalize_message_content(
+    content: Any,
+) -> str:
+    """
+    Convert Gemini/LangChain content to plain text.
+    """
+
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+
+        parts = []
+
+        for item in content:
+
+            if isinstance(item, str):
+
+                if item.strip():
+                    parts.append(
+                        item.strip()
+                    )
+
+            elif isinstance(item, dict):
+
+                text = item.get("text")
+
+                if text and str(text).strip():
+                    parts.append(
+                        str(text).strip()
+                    )
+
+        return "\n".join(parts).strip()
+
+    return str(content).strip()
 
 # ============================================================
 # PRODUCT EXTRACTION
