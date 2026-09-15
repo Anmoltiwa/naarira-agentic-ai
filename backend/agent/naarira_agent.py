@@ -9,7 +9,7 @@ from typing import Any
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.prebuilt import create_agent
+from langchain.agents import create_agent
 
 from rag.search import semantic_search
 
