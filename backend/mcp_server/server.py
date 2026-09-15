@@ -1,5 +1,7 @@
+import os
 from typing import Annotated
 
+from dotenv import load_dotenv
 from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 
@@ -9,13 +11,31 @@ from mcp_server.tools import (
     check_product_availability,
 )
 
+load_dotenv()
+
+
+# ---------------------------------------------------------
+# Environment configuration
+# ---------------------------------------------------------
+
+HOST = os.getenv("MCP_HOST", "127.0.0.1")
+PORT = int(os.getenv("MCP_PORT", "8001"))
+
+
+# ---------------------------------------------------------
+# MCP Server
+# ---------------------------------------------------------
 
 mcp = FastMCP(
     "Naarira Product Server",
-    host="127.0.0.1",
-    port=8001,
+    host=HOST,
+    port=PORT,
 )
 
+
+# ---------------------------------------------------------
+# TOOL 1: Search Products
+# ---------------------------------------------------------
 
 @mcp.tool()
 def search_products_tool(
@@ -26,7 +46,7 @@ def search_products_tool(
                 "Keyword or product name to search for, "
                 "such as saree, georgette or designer."
             )
-        )
+        ),
     ] = "",
 
     limit: Annotated[
@@ -34,45 +54,43 @@ def search_products_tool(
         Field(
             ge=1,
             le=20,
-            description="Maximum number of products to return."
-        )
+            description="Maximum number of products to return.",
+        ),
     ] = 5,
 
     min_price: Annotated[
         float | None,
         Field(
-            description="Minimum product price in INR."
-        )
+            description="Minimum product price in INR.",
+        ),
     ] = None,
 
     max_price: Annotated[
         float | None,
         Field(
-            description="Maximum product price in INR."
-        )
+            description="Maximum product price in INR.",
+        ),
     ] = None,
 
     color: Annotated[
         str | None,
         Field(
-            description="Desired product color."
-        )
+            description="Desired product color.",
+        ),
     ] = None,
 
     size: Annotated[
         str | None,
         Field(
-            description="Desired product size."
-        )
+            description="Desired product size.",
+        ),
     ] = None,
 
     available_only: Annotated[
         bool,
         Field(
-            description=(
-                "Return only currently available variants."
-            )
-        )
+            description="Return only currently available variants.",
+        ),
     ] = False,
 
     category: Annotated[
@@ -81,8 +99,8 @@ def search_products_tool(
             description=(
                 "Product category such as saree, "
                 "kurti, lehenga or dress."
-            )
-        )
+            ),
+        ),
     ] = None,
 ) -> list[dict]:
     """
@@ -103,29 +121,29 @@ def search_products_tool(
     )
 
 
+# ---------------------------------------------------------
+# TOOL 2: Product Details
+# ---------------------------------------------------------
+
 @mcp.tool()
 def get_product_details_tool(
     product_id: Annotated[
         int,
         Field(
             ge=1,
-            description="Database ID of the Naarira product."
-        )
-    ]
+            description="Database ID of the Naarira product.",
+        ),
+    ],
 ) -> dict:
-
     """
     Get complete details of a Naarira product,
     including variants, prices, sizes, colors,
     inventory and availability.
     """
 
-    product = get_product_details(
-        product_id=product_id
-    )
+    product = get_product_details(product_id=product_id)
 
     if product is None:
-
         return {
             "error": (
                 f"Product with ID {product_id} "
@@ -136,17 +154,20 @@ def get_product_details_tool(
     return product
 
 
+# ---------------------------------------------------------
+# TOOL 3: Product Availability
+# ---------------------------------------------------------
+
 @mcp.tool()
 def check_product_availability_tool(
     product_id: Annotated[
         int,
         Field(
             ge=1,
-            description="Database ID of the Naarira product."
-        )
-    ]
+            description="Database ID of the Naarira product.",
+        ),
+    ],
 ) -> dict:
-
     """
     Check available sizes, colors and inventory
     for a Naarira product.
@@ -157,7 +178,6 @@ def check_product_availability_tool(
     )
 
     if result is None:
-
         return {
             "error": "Product not found."
         }
@@ -165,24 +185,34 @@ def check_product_availability_tool(
     return result
 
 
+# ---------------------------------------------------------
+# Start MCP Server
+# ---------------------------------------------------------
+
 if __name__ == "__main__":
 
-    print("Starting Naarira MCP Server...")
+    print("=" * 60)
+    print("STARTING NAARIRA MCP SERVER")
+    print("=" * 60)
+
+    print(f"Host: {HOST}")
+    print(f"Port: {PORT}")
     print("Transport: Streamable HTTP")
-    print(
-        "MCP endpoint: "
-        "http://127.0.0.1:8001/mcp"
-    )
+    print(f"MCP endpoint: http://{HOST}:{PORT}/mcp")
 
     print(
         "Registered tools:",
         [
             tool.name
             for tool in mcp._tool_manager.list_tools()
-        ]
+        ],
     )
+
+    print("=" * 60)
 
     mcp.run(
         transport="streamable-http",
-        mount_path="/mcp"
+        host=HOST,
+        port=PORT,
+        mount_path="/mcp",
     )
