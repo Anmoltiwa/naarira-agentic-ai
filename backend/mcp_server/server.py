@@ -19,7 +19,13 @@ load_dotenv()
 # ---------------------------------------------------------
 
 HOST = os.getenv("MCP_HOST", "127.0.0.1")
-PORT = int(os.getenv("MCP_PORT", "8001"))
+
+PORT = int(
+    os.getenv(
+        "PORT",
+        os.getenv("MCP_PORT", "8001")
+    )
+)
 
 
 # ---------------------------------------------------------
@@ -212,7 +218,5 @@ if __name__ == "__main__":
 
     mcp.run(
         transport="streamable-http",
-        host=HOST,
-        port=PORT,
         mount_path="/mcp",
     )
