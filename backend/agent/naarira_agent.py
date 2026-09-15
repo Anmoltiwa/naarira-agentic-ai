@@ -359,10 +359,10 @@ async def create_naarira_agent():
         for tool in all_tools:
             tool_name = getattr(tool, "name", None)
 
-    if not tool_name:
-        tool_name = getattr(tool, "__name__", str(tool))
+            if not tool_name:
+             tool_name = getattr(tool, "__name__", str(tool))
 
-    print(f"  - {tool_name}")
+            print(f"  - {tool_name}")
 
         # ----------------------------------------------------
         # Create LangGraph agent
