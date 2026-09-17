@@ -35,6 +35,9 @@ PORT = int(
 
 mcp = FastMCP(
     "Naarira Product Server",
+    host=HOST,
+    port=PORT,
+    streamable_http_path="/mcp",
 )
 
 
