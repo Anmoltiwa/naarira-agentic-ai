@@ -15,34 +15,32 @@ from mcp_server.tools import (
 load_dotenv()
 
 
-# ---------------------------------------------------------
-# Environment configuration
-# ---------------------------------------------------------
+# =========================================================
+# ENVIRONMENT CONFIGURATION
+# =========================================================
 
 HOST = os.getenv("MCP_HOST", "127.0.0.1")
 
 PORT = int(
     os.getenv(
         "PORT",
-        os.getenv("MCP_PORT", "8001")
+        os.getenv("MCP_PORT", "8001"),
     )
 )
 
 
-# ---------------------------------------------------------
-# MCP Server
-# ---------------------------------------------------------
+# =========================================================
+# MCP SERVER
+# =========================================================
 
 mcp = FastMCP(
     "Naarira Product Server",
-    host=HOST,
-    port=PORT,
 )
 
 
-# ---------------------------------------------------------
-# TOOL 1: Search Products
-# ---------------------------------------------------------
+# =========================================================
+# TOOL 1: SEARCH PRODUCTS
+# =========================================================
 
 @mcp.tool()
 def search_products_tool(
@@ -52,10 +50,9 @@ def search_products_tool(
             description=(
                 "Keyword or product name to search for, "
                 "such as saree, georgette or designer."
-            )
+            ),
         ),
     ] = "",
-
     limit: Annotated[
         int,
         Field(
@@ -64,42 +61,38 @@ def search_products_tool(
             description="Maximum number of products to return.",
         ),
     ] = 5,
-
     min_price: Annotated[
         float | None,
         Field(
             description="Minimum product price in INR.",
         ),
     ] = None,
-
     max_price: Annotated[
         float | None,
         Field(
             description="Maximum product price in INR.",
         ),
     ] = None,
-
     color: Annotated[
         str | None,
         Field(
             description="Desired product color.",
         ),
     ] = None,
-
     size: Annotated[
         str | None,
         Field(
             description="Desired product size.",
         ),
     ] = None,
-
     available_only: Annotated[
         bool,
         Field(
-            description="Return only currently available variants.",
+            description=(
+                "Return only currently available variants."
+            ),
         ),
     ] = False,
-
     category: Annotated[
         str | None,
         Field(
@@ -111,9 +104,7 @@ def search_products_tool(
     ] = None,
 ) -> list[dict]:
     """
-    Search Naarira's product catalog using
-    keywords and structured filters such as
-    price, color, size, category and availability.
+    Search Naarira products using keywords and filters.
     """
 
     return search_products(
@@ -128,9 +119,9 @@ def search_products_tool(
     )
 
 
-# ---------------------------------------------------------
-# TOOL 2: Product Details
-# ---------------------------------------------------------
+# =========================================================
+# TOOL 2: PRODUCT DETAILS
+# =========================================================
 
 @mcp.tool()
 def get_product_details_tool(
@@ -143,27 +134,28 @@ def get_product_details_tool(
     ],
 ) -> dict:
     """
-    Get complete details of a Naarira product,
-    including variants, prices, sizes, colors,
-    inventory and availability.
+    Get complete product details including variants,
+    prices, sizes, colors, inventory and availability.
     """
 
-    product = get_product_details(product_id=product_id)
+    product = get_product_details(
+        product_id=product_id,
+    )
 
     if product is None:
         return {
             "error": (
                 f"Product with ID {product_id} "
                 "was not found."
-            )
+            ),
         }
 
     return product
 
 
-# ---------------------------------------------------------
-# TOOL 3: Product Availability
-# ---------------------------------------------------------
+# =========================================================
+# TOOL 3: PRODUCT AVAILABILITY
+# =========================================================
 
 @mcp.tool()
 def check_product_availability_tool(
@@ -181,57 +173,86 @@ def check_product_availability_tool(
     """
 
     result = check_product_availability(
-        product_id=product_id
+        product_id=product_id,
     )
 
     if result is None:
         return {
-            "error": "Product not found."
+            "error": "Product not found.",
         }
 
     return result
 
+
+# =========================================================
+# TOOL 4: ORDER TRACKING
+# =========================================================
+
 @mcp.tool()
 def track_order_tool(
-    order_number: str,
-    phone: str,
+    order_number: Annotated[
+        str,
+        Field(
+            description=(
+                "Shopify order number, for example 1269 "
+                "or #1269."
+            ),
+        ),
+    ],
+    phone: Annotated[
+        str,
+        Field(
+            description=(
+                "Phone number used when placing the order."
+            ),
+        ),
+    ],
 ) -> dict:
     """
     Track a customer's Shopify order.
 
-    Required:
-    - Order number
-    - Phone number used for the order
+    Both the order number and phone number are required.
+    The phone number is used to verify order ownership.
     """
 
     return track_order(
         order_number=order_number,
         phone=phone,
     )
-# ---------------------------------------------------------
-# Start MCP Server
-# ---------------------------------------------------------
+
+
+# =========================================================
+# START MCP SERVER
+# =========================================================
 
 if __name__ == "__main__":
 
-    print("=" * 60)
+    print("=" * 70)
     print("STARTING NAARIRA MCP SERVER")
-    print("=" * 60)
+    print("=" * 70)
 
     print(f"Host: {HOST}")
     print(f"Port: {PORT}")
     print("Transport: Streamable HTTP")
     print(f"MCP endpoint: http://{HOST}:{PORT}/mcp")
 
-    print(
-        "Registered tools:",
-        [
+    try:
+        registered_tools = [
             tool.name
             for tool in mcp._tool_manager.list_tools()
-        ],
-    )
+        ]
 
-    print("=" * 60)
+        print("Registered tools:")
+        for tool_name in registered_tools:
+            print(f"  - {tool_name}")
+
+    except Exception as exc:
+        print(
+            "Could not list registered tools:",
+            str(exc),
+        )
+
+    print("=" * 70)
 
     mcp.run(
         transport="streamable-http",
