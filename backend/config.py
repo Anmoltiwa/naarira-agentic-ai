@@ -62,6 +62,15 @@ SHOPIFY_CLIENT_SECRET = os.getenv(
     "SHOPIFY_CLIENT_SECRET"
 )
 
+SHOPIFY_API_VERSION = os.getenv(
+    "SHOPIFY_API_VERSION",
+    "2026-01",
+)
+
+SHOPIFY_GRAPHQL_URL = (
+    f"https://{SHOPIFY_SHOP}"
+    f"/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+)
 
 # ============================================================
 # SHOPIFY VALIDATION

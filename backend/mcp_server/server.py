@@ -9,6 +9,7 @@ from mcp_server.tools import (
     search_products,
     get_product_details,
     check_product_availability,
+    track_order,
 )
 
 load_dotenv()
@@ -190,7 +191,23 @@ def check_product_availability_tool(
 
     return result
 
+@mcp.tool()
+def track_order_tool(
+    order_number: str,
+    phone: str,
+) -> dict:
+    """
+    Track a customer's Shopify order.
 
+    Required:
+    - Order number
+    - Phone number used for the order
+    """
+
+    return track_order(
+        order_number=order_number,
+        phone=phone,
+    )
 # ---------------------------------------------------------
 # Start MCP Server
 # ---------------------------------------------------------

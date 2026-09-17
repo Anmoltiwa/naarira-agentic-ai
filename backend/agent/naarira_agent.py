@@ -1,29 +1,42 @@
-# backend/agent/naarira_agent.py
+"""
+Naarira Agent
 
-import os
+Phase C — Agent Routing
+Phase D1 — Structured API Response
+
+Capabilities:
+1. Product RAG
+2. Policy / FAQ RAG
+3. Product MCP tools
+4. Order tracking MCP tool
+
+Run from backend:
+
+    python -m agent.naarira_agent
+"""
+
+from __future__ import annotations
+
 import json
-import traceback
+import os
 import re
-from typing import Any
+import traceback
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
+from langchain.agents import create_agent
+from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain.agents import create_agent
 
-from rag.search import semantic_search
+from rag.policy_rag import generate_policy_answer
 
 
 # ============================================================
-# LOAD ENVIRONMENT
+# ENVIRONMENT
 # ============================================================
 
 load_dotenv()
-
-
-# ============================================================
-# CONFIGURATION
-# ============================================================
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -32,12 +45,10 @@ if not GEMINI_API_KEY:
         "GEMINI_API_KEY is missing in environment variables."
     )
 
-
-# Production:
-# MCP_URL=https://your-mcp-service.onrender.com/mcp
-#
-# Local:
-# MCP_URL=http://127.0.0.1:8001/mcp
+MODEL_NAME = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-3.8-flash",
+)
 
 MCP_URL = os.getenv(
     "MCP_URL",
@@ -46,19 +57,54 @@ MCP_URL = os.getenv(
 
 
 # ============================================================
-# MODEL
+# GEMINI MODEL
 # ============================================================
-
-MODEL_NAME = os.getenv(
-    "GEMINI_MODEL",
-    "gemini-3.6-flash",
-)
-
 
 model = ChatGoogleGenerativeAI(
     model=MODEL_NAME,
     google_api_key=GEMINI_API_KEY,
+    temperature=0,
 )
+
+
+# ============================================================
+# PRODUCT RAG IMPORT
+# ============================================================
+
+PRODUCT_RAG_FUNCTION = None
+
+try:
+    import rag.rag as product_rag_module
+
+    possible_names = [
+        "run_rag",
+        "search_products_with_rag",
+        "search_naarira_products_with_rag",
+        "rag_search",
+        "search_products",
+    ]
+
+    for function_name in possible_names:
+        candidate = getattr(
+            product_rag_module,
+            function_name,
+            None,
+        )
+
+        if callable(candidate):
+            PRODUCT_RAG_FUNCTION = candidate
+
+            print(
+                f"✓ Product RAG function found: {function_name}"
+            )
+            break
+
+except Exception as exc:
+    print(
+        "⚠ Could not import rag.rag:",
+        type(exc).__name__,
+        str(exc),
+    )
 
 
 # ============================================================
@@ -66,232 +112,273 @@ model = ChatGoogleGenerativeAI(
 # ============================================================
 
 SYSTEM_PROMPT = """
-You are Naarira AI, the shopping assistant for Naarira,
-a women's ethnic fashion store.
+You are Naarira's AI shopping and customer-support assistant.
 
-Naarira sells products such as:
+You have THREE main capabilities:
 
-- Sarees
-- Suits
-- Dresses
-- Kurtis
-- Lehengas
-- Ethnic wear
+============================================================
+1. PRODUCT SEARCH
+============================================================
 
-Your job is to help customers discover products and answer
-product-related questions using ONLY reliable catalog data.
+Use product tools for:
 
-IMPORTANT RULES
-================
+- sarees
+- suits
+- kurtis
+- lehengas
+- dresses
+- ethnic wear
+- product prices
+- sizes
+- colors
+- availability
+- product recommendations
+- products under a specific price
+- product details
 
-1. NEVER invent products.
 
-2. NEVER invent prices.
+============================================================
+2. POLICY / FAQ
+============================================================
 
-3. NEVER invent sizes.
+Use the policy tool for:
 
-4. NEVER invent colors.
+- shipping
+- delivery
+- shipping charges
+- free shipping
+- return policy
+- refund policy
+- exchanges
+- cancellation
+- damaged/defective items
+- non-returnable items
+- shipping address changes
+- general FAQs
 
-5. NEVER invent inventory.
 
-6. NEVER invent product availability.
+============================================================
+3. ORDER TRACKING
+============================================================
 
-7. NEVER invent product URLs.
+Use the order tracking tool ONLY for a customer's
+specific order.
 
-8. Use MCP for structured catalog information such as:
+Customer must provide BOTH:
 
-   - price
-   - color
-   - size
-   - category
-   - stock
-   - availability
+1. Order number
+2. Phone number used for the order
 
-9. Use RAG for semantic product discovery.
+IMPORTANT:
 
-10. For combined queries, use MCP for hard constraints and
-    RAG for semantic relevance when useful.
+- Never guess an order number.
+- Never guess a phone number.
+- Never invent tracking information.
+- Never expose another customer's information.
+- Do not call track_order_tool when required information
+  is missing.
 
 Examples:
 
-"Show designer sarees"
-    -> RAG can help discover semantically relevant products.
+"Where is my order?"
 
-"Show sarees under 2000"
-    -> MCP structured filtering.
+→ Ask for order number AND phone number.
 
-"Show black sarees under 2000"
-    -> MCP structured filtering.
+"Track order #1269"
 
-"Show elegant designer sarees under 2000"
-    -> MCP for price restriction,
-       then RAG for semantic ranking.
+→ Ask for phone number.
 
-"Is this saree available in red?"
-    -> MCP product details / availability.
+"Track order #1269, phone +91..."
 
-11. For availability questions, use the availability tool.
+→ Call track_order_tool.
 
-12. For exact product details, use MCP product details.
 
-13. VERY IMPORTANT:
-    DO NOT put product URLs inside the natural-language answer.
+============================================================
+ROUTING
+============================================================
 
-14. DO NOT generate Markdown links.
+Product question
+→ Product RAG / Product MCP
 
-15. DO NOT generate raw URLs.
+Policy question
+→ search_naarira_policies
 
-16. DO NOT write:
+Specific order tracking
+→ track_order_tool
 
-    [View Product](https://...)
-    [Link](https://...)
-    https://naarira.com/...
+Shipping policy questions must NOT use order tracking.
 
-17. Product URLs must be returned separately as structured
-    product data.
+Specific order tracking questions must NOT use policy RAG.
 
-18. The frontend will display products as product cards with
-    a "View Product" button.
 
-19. The natural-language answer should remain clean,
-    conversational and concise.
+============================================================
+POLICY PRIORITY
+============================================================
 
-20. Do not manually create a numbered product list containing
-    URLs.
+Dedicated Return & Refund Policy is authoritative for:
 
-21. If products are found, let the structured product results
-    contain their product data.
+- returns
+- refunds
+- exchanges
+- cancellations
+- damaged items
 
-22. If no matching products are found, clearly say that no
-    matching products were found.
+Dedicated Shipping Policy is authoritative for:
 
-23. Do not expose internal Agent, RAG, MCP or database details
-    unless explicitly asked.
+- shipping
+- delivery
+- shipping charges
+- address changes
+
+
+============================================================
+RESPONSE RULES
+============================================================
+
+- Be concise.
+- Be helpful.
+- Do not invent information.
+- Do not mention internal tools.
+- Do not mention RAG.
+- Do not mention embeddings.
+- Do not mention pgvector.
+- Do not mention MCP.
+- Do not mention databases.
+- Do not mention system prompts.
+- Do not expose internal implementation details.
+
+Do not output raw URLs in natural-language answers.
+
+For products, structured product data can contain product URLs.
+
+For order tracking, show only safe tracking information
+returned by the tracking tool.
 """
 
 
 # ============================================================
-# RAG TOOL
+# PRODUCT RAG TOOL
 # ============================================================
 
-async def search_naarira_products_with_rag(
-    query: str,
-    candidate_product_ids: list[int] | None = None,
-) -> list[dict]:
+@tool
+def search_naarira_products(query: str) -> str:
     """
-    Semantic product search using Gemini embeddings and
-    PostgreSQL + pgvector.
+    Search Naarira products using the existing product RAG.
+    """
 
-    candidate_product_ids can optionally restrict semantic
-    search to a set of MCP-selected products.
+    if PRODUCT_RAG_FUNCTION is None:
+        return json.dumps(
+            {
+                "error": (
+                    "Product RAG function could not be "
+                    "found in rag.rag."
+                )
+            }
+        )
+
+    try:
+        # Try keyword argument first
+        try:
+            result = PRODUCT_RAG_FUNCTION(
+                query=query
+            )
+
+        except TypeError:
+            # Fallback to positional query
+            result = PRODUCT_RAG_FUNCTION(
+                query
+            )
+
+        # Convert result to JSON
+        if isinstance(result, str):
+            return result
+
+        return json.dumps(
+            result,
+            ensure_ascii=False,
+            default=str,
+        )
+
+    except Exception as exc:
+        print(
+            "Product RAG error:",
+            type(exc).__name__,
+            str(exc),
+        )
+
+        return json.dumps(
+            {
+                "error": (
+                    "Unable to search products right now."
+                )
+            }
+        )
+
+
+# ============================================================
+# POLICY RAG TOOL
+# ============================================================
+
+@tool
+def search_naarira_policies(query: str) -> str:
+    """
+    Answer Naarira shipping, return, refund, exchange,
+    cancellation and FAQ questions from canonical knowledge.
     """
 
     try:
-
-        print()
-        print("=" * 60)
-        print("RAG SEARCH")
-        print("=" * 60)
-
-        print(
-            f"Query: {query}"
+        result = generate_policy_answer(
+            question=query,
+            top_k=3,
         )
 
-        print(
-            f"Candidate IDs: {candidate_product_ids}"
+        return json.dumps(
+            result,
+            ensure_ascii=False,
+            default=str,
         )
-
-        results = semantic_search(
-            query=query,
-            top_k=5,
-            candidate_product_ids=candidate_product_ids,
-        )
-
-        print(
-            f"RAG results: {len(results)}"
-        )
-
-        return results
 
     except Exception as exc:
-
-        print()
-        print("=" * 60)
-        print("RAG SEARCH FAILED")
-        print("=" * 60)
-
         print(
-            f"Error type: {type(exc).__name__}"
+            "Policy RAG error:",
+            type(exc).__name__,
+            str(exc),
         )
 
-        print(
-            f"Error: {exc}"
+        return json.dumps(
+            {
+                "error": (
+                    "Unable to retrieve policy information "
+                    "right now."
+                )
+            }
         )
-
-        traceback.print_exc()
-
-        return []
 
 
 # ============================================================
 # MCP CLIENT
 # ============================================================
 
-async def create_mcp_client():
-    """
-    Create the MCP client configuration.
+def create_mcp_client() -> MultiServerMCPClient:
 
-    Production:
-        MCP_URL=https://your-mcp-service.onrender.com/mcp
-
-    Local:
-        MCP_URL=http://127.0.0.1:8001/mcp
-    """
-
-    print()
-    print("=" * 60)
+    print("\n" + "=" * 70)
     print("CONNECTING TO NAARIRA MCP SERVER")
-    print("=" * 60)
+    print("=" * 70)
 
-    print(
-        f"MCP URL: {MCP_URL}"
+    print(f"MCP URL: {MCP_URL}")
+
+    client = MultiServerMCPClient(
+        {
+            "naarira": {
+                "transport": "http",
+                "url": MCP_URL,
+            }
+        }
     )
 
-    try:
+    print("✓ MCP client created successfully.")
 
-        client = MultiServerMCPClient(
-            {
-                "naarira": {
-                    "transport": "http",
-                    "url": MCP_URL,
-                }
-            }
-        )
-
-        print(
-            "MCP client created successfully."
-        )
-
-        return client
-
-    except Exception as exc:
-
-        print()
-        print("=" * 60)
-        print("MCP CLIENT CREATION FAILED")
-        print("=" * 60)
-
-        print(
-            f"Error type: {type(exc).__name__}"
-        )
-
-        print(
-            f"Error: {exc}"
-        )
-
-        traceback.print_exc()
-
-        raise
+    return client
 
 
 # ============================================================
@@ -299,123 +386,27 @@ async def create_mcp_client():
 # ============================================================
 
 async def create_naarira_agent():
-    """
-    Initialize:
 
-    Gemini
-       +
-    RAG
-       +
-    MCP
-       +
-    LangGraph Agent
-    """
-
-    print()
-    print("=" * 60)
+    print("\n" + "=" * 70)
     print("INITIALIZING NAARIRA AGENT")
-    print("=" * 60)
+    print("=" * 70)
 
-    print(
-        f"Gemini model: {MODEL_NAME}"
-    )
+    print(f"Gemini model: {MODEL_NAME}")
+    print(f"MCP URL: {MCP_URL}")
 
-    print(
-        f"MCP URL: {MCP_URL}"
-    )
+    # --------------------------------------------------------
+    # MCP
+    # --------------------------------------------------------
+
+    mcp_client = create_mcp_client()
+
+    print("\nLoading MCP tools...")
 
     try:
-
-        # ----------------------------------------------------
-        # Create MCP client
-        # ----------------------------------------------------
-
-        mcp_client = await create_mcp_client()
-
-        # ----------------------------------------------------
-        # Load MCP tools
-        # ----------------------------------------------------
-
-        print()
-        print(
-            "Loading MCP tools..."
-        )
-
         mcp_tools = await mcp_client.get_tools()
 
-        print(
-            f"Loaded {len(mcp_tools)} MCP tools."
-        )
-
-        for tool in mcp_tools:
-
-            print(
-                f"  - {tool.name}"
-            )
-
-        # ----------------------------------------------------
-        # Combine tools
-        # ----------------------------------------------------
-
-        all_tools = [
-            search_naarira_products_with_rag,
-            *mcp_tools,
-        ]
-
-        print()
-        print(
-            f"Total agent tools: {len(all_tools)}"
-        )
-
-        for tool in all_tools:
-
-            tool_name = getattr(
-                tool,
-                "name",
-                None,
-            )
-
-            if not tool_name:
-
-                tool_name = getattr(
-                    tool,
-                    "__name__",
-                    str(tool),
-                )
-
-            print(
-                f"  - {tool_name}"
-            )
-
-        # ----------------------------------------------------
-        # Create LangGraph Agent
-        # ----------------------------------------------------
-
-        print()
-        print(
-            "Creating LangGraph agent..."
-        )
-
-        agent = create_agent(
-            model=model,
-            tools=all_tools,
-            system_prompt=SYSTEM_PROMPT,
-            name="naarira_shopping_agent",
-        )
-
-        print()
-        print("=" * 60)
-        print("NAARIRA AGENT INITIALIZED SUCCESSFULLY")
-        print("=" * 60)
-
-        return agent
-
     except Exception as exc:
-
-        print()
-        print("=" * 60)
-        print("FAILED TO INITIALIZE NAARIRA AGENT")
-        print("=" * 60)
+        print("\n❌ Failed to load MCP tools.")
 
         print(
             f"Error type: {type(exc).__name__}"
@@ -425,1055 +416,218 @@ async def create_naarira_agent():
             f"Error: {exc}"
         )
 
-        print()
-        print("FULL TRACEBACK:")
-        print("-" * 60)
-
         traceback.print_exc()
-
-        print("-" * 60)
 
         raise
 
-
-# ============================================================
-# JSON EXTRACTION HELPERS
-# ============================================================
-
-def _extract_json_objects(
-    text: str,
-) -> list[dict]:
-
-    if not text:
-        return []
-
-    text = text.strip()
-
-    results = []
-
-    # --------------------------------------------------------
-    # Direct JSON
-    # --------------------------------------------------------
-
-    try:
-
-        parsed = json.loads(text)
-
-        if isinstance(
-            parsed,
-            dict,
-        ):
-
-            results.append(
-                parsed
-            )
-
-        elif isinstance(
-            parsed,
-            list,
-        ):
-
-            results.extend(
-                item
-                for item in parsed
-                if isinstance(
-                    item,
-                    dict,
-                )
-            )
-
-    except Exception:
-        pass
-
-    # --------------------------------------------------------
-    # Markdown JSON block
-    # --------------------------------------------------------
-
-    code_blocks = re.findall(
-        r"```(?:json)?\s*(.*?)\s*```",
-        text,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-
-    for block in code_blocks:
-
-        try:
-
-            parsed = json.loads(
-                block.strip()
-            )
-
-            if isinstance(
-                parsed,
-                dict,
-            ):
-
-                results.append(
-                    parsed
-                )
-
-            elif isinstance(
-                parsed,
-                list,
-            ):
-
-                results.extend(
-                    item
-                    for item in parsed
-                    if isinstance(
-                        item,
-                        dict,
-                    )
-                )
-
-        except Exception:
-
-            continue
-
-    # --------------------------------------------------------
-    # Generic JSON objects
-    # --------------------------------------------------------
-
-    for match in re.finditer(
-        r"\{.*?\}",
-        text,
-        flags=re.DOTALL,
-    ):
-
-        candidate = match.group(0)
-
-        try:
-
-            parsed = json.loads(
-                candidate
-            )
-
-            if isinstance(
-                parsed,
-                dict,
-            ):
-
-                results.append(
-                    parsed
-                )
-
-        except Exception:
-
-            continue
-
-    return results
-
-
-# ============================================================
-# MESSAGE CONTENT NORMALIZATION
-# ============================================================
-
-def normalize_message_content(
-    content: Any,
-) -> str:
-
-    if content is None:
-        return ""
-
-    if isinstance(
-        content,
-        str,
-    ):
-
-        return content.strip()
-
-    if isinstance(
-        content,
-        list,
-    ):
-
-        parts = []
-
-        for item in content:
-
-            if isinstance(
-                item,
-                str,
-            ):
-
-                if item.strip():
-
-                    parts.append(
-                        item.strip()
-                    )
-
-            elif isinstance(
-                item,
-                dict,
-            ):
-
-                text = item.get(
-                    "text"
-                )
-
-                if (
-                    text
-                    and str(text).strip()
-                ):
-
-                    parts.append(
-                        str(text).strip()
-                    )
-
-        return "\n".join(
-            parts
-        ).strip()
-
-    return str(
-        content
-    ).strip()
-
-
-# ============================================================
-# RESPONSE EXTRACTION
-# ============================================================
-
-def extract_response(
-    result: Any,
-) -> str:
-    """
-    Extract final assistant response without recursion.
-    """
-
-    if result is None:
-        return ""
-
-    # --------------------------------------------------------
-    # LangGraph state dictionary
-    # --------------------------------------------------------
-
-    if isinstance(
-        result,
-        dict,
-    ):
-
-        messages = result.get(
-            "messages"
-        )
-
-        if messages:
-
-            return extract_response_from_messages(
-                messages
-            )
-
-        for key in (
-            "answer",
-            "output",
-            "response",
-            "content",
-        ):
-
-            value = result.get(
-                key
-            )
-
-            if (
-                isinstance(
-                    value,
-                    str,
-                )
-                and value.strip()
-            ):
-
-                return value.strip()
-
-        return ""
-
-    # --------------------------------------------------------
-    # List of messages
-    # --------------------------------------------------------
-
-    if isinstance(
-        result,
-        list,
-    ):
-
-        return extract_response_from_messages(
-            result
-        )
-
-    # --------------------------------------------------------
-    # Single message object
-    # --------------------------------------------------------
-
-    content = getattr(
-        result,
-        "content",
-        None,
-    )
-
-    if content is not None:
-
-        return normalize_message_content(
-            content
-        )
-
-    return str(
-        result
-    )
-
-
-def extract_response_from_messages(
-    messages: list[Any],
-) -> str:
-    """
-    Extract the last meaningful assistant/model message.
-    """
-
-    if not messages:
-        return ""
-
-    for message in reversed(
-        messages
-    ):
-
-        # ----------------------------------------------------
-        # Dictionary message
-        # ----------------------------------------------------
-
-        if isinstance(
-            message,
-            dict,
-        ):
-
-            role = str(
-                message.get("role")
-                or message.get("type")
-                or ""
-            ).lower()
-
-            if role in {
-                "tool",
-                "function",
-            }:
-
-                continue
-
-            content = message.get(
-                "content"
-            )
-
-            text = normalize_message_content(
-                content
-            )
-
-            if text:
-
-                return text
-
-            continue
-
-        # ----------------------------------------------------
-        # LangChain message
-        # ----------------------------------------------------
-
-        message_type = str(
-            getattr(
-                message,
-                "type",
-                "",
-            )
-            or ""
-        ).lower()
-
-        if message_type in {
-            "tool",
-            "function",
-        }:
-
-            continue
-
-        content = getattr(
-            message,
-            "content",
-            None,
-        )
-
-        text = normalize_message_content(
-            content
-        )
-
-        if text:
-
-            return text
-
-    return ""
-
-
-# ============================================================
-# PRODUCT EXTRACTION
-# ============================================================
-
-def extract_products_from_result(
-    result: Any,
-) -> list[dict]:
-    """
-    Extract structured products from Agent/MCP/RAG results.
-    """
-
-    products = []
-
-    def collect(
-        value: Any,
-    ):
-
-        if value is None:
-            return
-
-        # ----------------------------------------------------
-        # Dictionary
-        # ----------------------------------------------------
-
-        if isinstance(
-            value,
-            dict,
-        ):
-
-            # Direct product object
-            if (
-                "product_id" in value
-                or "id" in value
-            ) and (
-                "title" in value
-                or "name" in value
-            ):
-
-                product = {
-                    "product_id": (
-                        value.get(
-                            "product_id"
-                        )
-                        or value.get(
-                            "id"
-                        )
-                    ),
-                    "title": (
-                        value.get(
-                            "title"
-                        )
-                        or value.get(
-                            "name"
-                        )
-                    ),
-                    "handle": value.get(
-                        "handle"
-                    ),
-                    "category": value.get(
-                        "category"
-                    ),
-                    "url": (
-                        value.get(
-                            "url"
-                        )
-                        or value.get(
-                            "product_url"
-                        )
-                    ),
-                    "price": value.get(
-                        "price"
-                    ),
-                    "image_url": (
-                        value.get(
-                            "image_url"
-                        )
-                        or value.get(
-                            "image"
-                        )
-                    ),
-                    "available": value.get(
-                        "available"
-                    ),
-                }
-
-                if product[
-                    "title"
-                ]:
-
-                    products.append(
-                        product
-                    )
-
-            # ------------------------------------------------
-            # Common product containers
-            # ------------------------------------------------
-
-            for key in (
-                "products",
-                "results",
-                "items",
-                "data",
-                "matches",
-            ):
-
-                if key in value:
-
-                    collect(
-                        value[key]
-                    )
-
-            # ------------------------------------------------
-            # Recurse nested objects
-            # ------------------------------------------------
-
-            for key, item in value.items():
-
-                if key in {
-                    "products",
-                    "results",
-                    "items",
-                    "data",
-                    "matches",
-                }:
-
-                    continue
-
-                if isinstance(
-                    item,
-                    (
-                        dict,
-                        list,
-                    ),
-                ):
-
-                    collect(
-                        item
-                    )
-
-            return
-
-        # ----------------------------------------------------
-        # List
-        # ----------------------------------------------------
-
-        if isinstance(
-            value,
-            list,
-        ):
-
-            for item in value:
-
-                collect(
-                    item
-                )
-
-            return
-
-        # ----------------------------------------------------
-        # String containing JSON
-        # ----------------------------------------------------
-
-        if isinstance(
-            value,
-            str,
-        ):
-
-            parsed_objects = (
-                _extract_json_objects(
-                    value
-                )
-            )
-
-            for obj in parsed_objects:
-
-                collect(
-                    obj
-                )
-
-            return
-
-        # ----------------------------------------------------
-        # Object containing content
-        # ----------------------------------------------------
-
-        content = getattr(
-            value,
-            "content",
-            None,
-        )
-
-        if content is not None:
-
-            collect(
-                content
-            )
-
-    # Start
-    collect(
-        result
-    )
-
-    # --------------------------------------------------------
-    # De-duplicate
-    # --------------------------------------------------------
-
-    unique_products = []
-
-    seen = set()
-
-    for product in products:
-
-        product_id = product.get(
-            "product_id"
-        )
-
-        title = product.get(
-            "title"
-        )
-
-        key = (
-            str(product_id)
-            if product_id is not None
-            else str(
-                title or ""
-            ).lower()
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(
-            key
-        )
-
-        unique_products.append(
-            product
-        )
-
-    return unique_products
-
-
-# ============================================================
-# NORMALIZE PRODUCTS
-# ============================================================
-
-def normalize_products(
-    products: list[dict],
-) -> list[dict]:
-    """
-    Normalize structured product response for FastAPI/frontend.
-    """
-
-    cleaned = []
-
-    for product in products:
-
-        title = product.get(
-            "title"
-        )
-
-        if not title:
-            continue
-
-        # ----------------------------------------------------
-        # Product ID
-        # ----------------------------------------------------
-
-        product_id = product.get(
-            "product_id"
-        )
-
-        try:
-
-            if product_id is not None:
-
-                product_id = int(
-                    product_id
-                )
-
-        except Exception:
-
-            product_id = None
-
-        # ----------------------------------------------------
-        # Handle
-        # ----------------------------------------------------
-
-        handle = product.get(
-            "handle"
-        )
-
-        # ----------------------------------------------------
-        # Category
-        # ----------------------------------------------------
-
-        category = product.get(
-            "category"
-        )
-
-        # ----------------------------------------------------
-        # URL
-        # ----------------------------------------------------
-
-        url = (
-            product.get(
-                "url"
-            )
-            or product.get(
-                "product_url"
-            )
-        )
-
-        # Safe Shopify fallback
-        if (
-            not url
-            and handle
-        ):
-
-            url = (
-                "https://naarira.com/products/"
-                f"{handle}"
-            )
-
-        # Product must have a usable URL
-        if not url:
-            continue
-
-        # ----------------------------------------------------
-        # Price
-        # ----------------------------------------------------
-
-        price = product.get(
-            "price"
-        )
-
-        # ----------------------------------------------------
-        # Image
-        # ----------------------------------------------------
-
-        image_url = (
-            product.get(
-                "image_url"
-            )
-            or product.get(
-                "image"
-            )
-        )
-
-        # ----------------------------------------------------
-        # Availability
-        # ----------------------------------------------------
-
-        available = product.get(
-            "available"
-        )
-
-        cleaned.append(
-            {
-                "product_id": product_id,
-                "title": str(title),
-                "handle": handle,
-                "category": category,
-                "url": str(url),
-                "price": price,
-                "image_url": image_url,
-                "available": available,
-            }
-        )
-
-    return cleaned
-
-
-# ============================================================
-# CLEAN AI ANSWER
-# ============================================================
-
-def clean_ai_answer(
-    answer: str,
-) -> str:
-    """
-    Remove URLs and Markdown product links from the AI answer.
-
-    Product URLs are displayed separately by the frontend.
-    """
-
-    if not answer:
-        return ""
-
-    clean = str(
-        answer
-    )
-
-    # --------------------------------------------------------
-    # Convert Markdown links to their visible text
-    #
-    # [View Product](https://...)
-    # ->
-    # View Product
-    # --------------------------------------------------------
-
-    clean = re.sub(
-        r"\[([^\]]+)\]\(\s*https?://[^)]+\)",
-        r"\1",
-        clean,
-        flags=re.IGNORECASE,
-    )
-
-    # --------------------------------------------------------
-    # Remove raw Naarira product URLs
-    # --------------------------------------------------------
-
-    clean = re.sub(
-        r"https?://(?:www\.)?naarira\.com/products/[^\s<>\])}]+",
-        "",
-        clean,
-        flags=re.IGNORECASE,
-    )
-
-    # --------------------------------------------------------
-    # Remove explicit "Link:" lines
-    # --------------------------------------------------------
-
-    clean = re.sub(
-        r"(?im)^\s*(?:link|product link)\s*:\s*.*$",
-        "",
-        clean,
-    )
-
-    # --------------------------------------------------------
-    # Clean empty markdown lines
-    # --------------------------------------------------------
-
-    clean = re.sub(
-        r"\n\s*[-•]\s*\n",
-        "\n",
-        clean,
-    )
-
-    # --------------------------------------------------------
-    # Remove excessive blank lines
-    # --------------------------------------------------------
-
-    clean = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        clean,
-    )
-
-    return clean.strip()
-
-
-# ============================================================
-# AGENT RUNNER
-# ============================================================
-
-async def run_naarira_agent(
-    query: str,
-    agent=None,
-    debug: bool = False,
-) -> dict:
-    """
-    Run a user query through the Naarira Agent.
-
-    Returns:
-
-    {
-        "answer": "...",
-        "products": [...]
-    }
-    """
-
-    if not query or not query.strip():
-
-        return {
-            "answer": (
-                "Please tell me what you're looking for."
-            ),
-            "products": [],
-        }
-
-    query = query.strip()
-
-    print()
-    print("=" * 60)
-    print("RUNNING NAARIRA AGENT")
-    print("=" * 60)
-
     print(
-        f"User query: {query}"
+        f"✓ Loaded {len(mcp_tools)} MCP tools."
     )
 
-    try:
+    print("\nMCP tools:")
 
-        # ----------------------------------------------------
-        # Create agent if needed
-        # ----------------------------------------------------
-
-        if agent is None:
-
-            agent = await create_naarira_agent()
-
-        # ----------------------------------------------------
-        # Invoke LangGraph Agent
-        # ----------------------------------------------------
-
-        result = await agent.ainvoke(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": query,
-                    }
-                ]
-            }
-        )
-
-        # ----------------------------------------------------
-        # Extract answer
-        # ----------------------------------------------------
-
-        answer = extract_response(
-            result
-        )
-
-        # ----------------------------------------------------
-        # Clean answer
-        # ----------------------------------------------------
-
-        answer = clean_ai_answer(
-            answer
-        )
-
-        # ----------------------------------------------------
-        # Extract products
-        # ----------------------------------------------------
-
-        products = (
-            extract_products_from_result(
-                result
-            )
-        )
-
-        products = normalize_products(
-            products
-        )
-
-        # ----------------------------------------------------
-        # Debug
-        # ----------------------------------------------------
-
-        if debug:
-
-            print()
-            print("=" * 60)
-            print("AGENT ANSWER")
-            print("=" * 60)
-
-            print(
-                answer
-            )
-
-            print()
-            print("=" * 60)
-            print("PRODUCTS")
-            print("=" * 60)
-
-            print(
-                json.dumps(
-                    products,
-                    indent=2,
-                    ensure_ascii=False,
-                )
-            )
-
-        return {
-            "answer": answer,
-            "products": products,
-        }
-
-    except Exception as exc:
-
-        print()
-        print("=" * 60)
-        print("NAARIRA AGENT EXECUTION FAILED")
-        print("=" * 60)
-
-        print(
-            f"Error type: {type(exc).__name__}"
-        )
-
-        print(
-            f"Error: {exc}"
-        )
-
-        traceback.print_exc()
-
-        return {
-            "answer": (
-                "I'm sorry, but I couldn't process "
-                "your request right now. Please try again."
-            ),
-            "products": [],
-        }
-
-
-# ============================================================
-# AGENT TRACE
-# ============================================================
-
-def print_agent_trace(
-    result: Any,
-):
-
-    print()
-    print("=" * 60)
-    print("AGENT TRACE")
-    print("=" * 60)
-
-    if not isinstance(
-        result,
-        dict,
-    ):
-
-        print(
-            result
-        )
-
-        return
-
-    messages = result.get(
-        "messages",
-        [],
-    )
-
-    for index, message in enumerate(
-        messages,
+    for index, mcp_tool in enumerate(
+        mcp_tools,
         start=1,
     ):
-
-        print()
         print(
-            f"--- MESSAGE {index} ---"
+            f"  {index}. {mcp_tool.name}"
         )
 
-        message_type = getattr(
-            message,
-            "type",
-            None,
+    # --------------------------------------------------------
+    # Verify track_order_tool
+    # --------------------------------------------------------
+
+    mcp_tool_names = {
+        tool_item.name
+        for tool_item in mcp_tools
+    }
+
+    if "track_order_tool" in mcp_tool_names:
+
+        print(
+            "\n✓ track_order_tool is available."
         )
 
-        if message_type:
+    else:
 
-            print(
-                f"type: {message_type}"
-            )
-
-        name = getattr(
-            message,
-            "name",
-            None,
+        print(
+            "\n⚠ WARNING:"
+            "\ntrack_order_tool is NOT available."
         )
 
-        if name:
+    # --------------------------------------------------------
+    # All tools
+    # --------------------------------------------------------
 
-            print(
-                f"name: {name}"
-            )
+    all_tools = [
+        search_naarira_products,
+        search_naarira_policies,
+        *mcp_tools,
+    ]
+
+    print("\nAgent tools:")
+
+    for index, agent_tool in enumerate(
+        all_tools,
+        start=1,
+    ):
+        print(
+            f"  {index}. {agent_tool.name}"
+        )
+
+    print(
+        f"\nTotal agent tools: {len(all_tools)}"
+    )
+
+    # --------------------------------------------------------
+    # Create LangChain agent
+    # --------------------------------------------------------
+
+    agent = create_agent(
+        model=model,
+        tools=all_tools,
+        system_prompt=SYSTEM_PROMPT,
+        name="naarira_shopping_agent",
+    )
+
+    print("\n" + "=" * 70)
+
+    print(
+        "NAARIRA AGENT INITIALIZED SUCCESSFULLY ✅"
+    )
+
+    print("=" * 70)
+
+    return agent, mcp_client
+
+
+# ============================================================
+# GLOBAL AGENT CACHE
+# ============================================================
+
+_agent_instance = None
+
+
+async def get_naarira_agent():
+
+    """
+    Create the Naarira agent only once and reuse it.
+
+    This avoids rebuilding the LangGraph agent and reconnecting
+    to MCP on every API request.
+    """
+
+    global _agent_instance
+
+    if _agent_instance is None:
+
+        print("=" * 70)
+        print("INITIALIZING CACHED NAARIRA AGENT")
+        print("=" * 70)
+
+        _agent_instance = await create_naarira_agent()
+
+        print("✓ Naarira agent initialized")
+
+        print("=" * 70)
+
+    return _agent_instance
+
+
+# ============================================================
+# SAFE JSON PARSER
+# ============================================================
+
+def _safe_json(value: Any) -> Any:
+
+    """
+    Convert tool output into Python objects whenever possible.
+    """
+
+    if value is None:
+        return None
+
+    if isinstance(
+        value,
+        (dict, list, int, float, bool),
+    ):
+        return value
+
+    if isinstance(value, str):
+
+        text = value.strip()
+
+        if not text:
+            return ""
+
+        try:
+            return json.loads(text)
+
+        except (
+            json.JSONDecodeError,
+            TypeError,
+        ):
+            return text
+
+    return str(value)
+
+
+# ============================================================
+# TOOL NAME CLASSIFICATION
+# ============================================================
+
+def _is_order_tool(tool_name: str) -> bool:
+
+    name = (tool_name or "").lower()
+
+    return (
+        "track_order" in name
+        or "order_tracking" in name
+        or "trackorder" in name
+    )
+
+
+def _is_policy_tool(tool_name: str) -> bool:
+
+    name = (tool_name or "").lower()
+
+    return (
+        "policy" in name
+        or "faq" in name
+    )
+
+
+def _is_product_tool(tool_name: str) -> bool:
+
+    name = (tool_name or "").lower()
+
+    return (
+        "product" in name
+        or "availability" in name
+    )
+
+
+# ============================================================
+# EXTRACT TOOL CALL NAMES
+# ============================================================
+
+def _extract_tool_names(
+    messages: List[Any],
+) -> List[str]:
+
+    """
+    Extract tool names from LangChain AIMessage / ToolMessage
+    objects.
+    """
+
+    names: List[str] = []
+
+    for message in messages:
+
+        # ----------------------------------------------------
+        # AIMessage.tool_calls
+        # ----------------------------------------------------
 
         tool_calls = getattr(
             message,
@@ -1483,17 +637,69 @@ def print_agent_trace(
 
         if tool_calls:
 
-            print(
-                "tool_calls:"
-            )
+            for call in tool_calls:
 
-            print(
-                json.dumps(
-                    tool_calls,
-                    indent=2,
-                    default=str,
-                )
-            )
+                if isinstance(call, dict):
+
+                    name = call.get("name")
+
+                    if name:
+                        names.append(str(name))
+
+        # ----------------------------------------------------
+        # ToolMessage.name
+        # ----------------------------------------------------
+
+        message_name = getattr(
+            message,
+            "name",
+            None,
+        )
+
+        if message_name:
+            names.append(str(message_name))
+
+    # Remove duplicates while preserving order
+
+    result = []
+
+    seen = set()
+
+    for name in names:
+
+        if name not in seen:
+
+            seen.add(name)
+
+            result.append(name)
+
+    return result
+
+
+# ============================================================
+# EXTRACT TOOL RESULTS
+# ============================================================
+
+def _extract_tool_results(
+    messages: List[Any],
+) -> List[Dict[str, Any]]:
+
+    """
+    Read ToolMessage outputs from the agent state.
+    """
+
+    results: List[Dict[str, Any]] = []
+
+    for message in messages:
+
+        message_name = getattr(
+            message,
+            "name",
+            None,
+        )
+
+        if not message_name:
+            continue
 
         content = getattr(
             message,
@@ -1501,128 +707,530 @@ def print_agent_trace(
             None,
         )
 
-        if content:
+        if content is None:
+            continue
 
-            print(
-                "content:"
-            )
+        parsed = _safe_json(content)
 
-            if isinstance(
-                content,
-                str,
-            ):
-
-                print(
-                    content
-                )
-
-            else:
-
-                print(
-                    json.dumps(
-                        content,
-                        indent=2,
-                        default=str,
-                    )
-                )
-
-
-# ============================================================
-# CLI TEST
-# ============================================================
-
-async def main():
-
-    print()
-    print("=" * 70)
-    print("NAARIRA AGENT TEST")
-    print("=" * 70)
-
-    print(
-        f"MCP URL: {MCP_URL}"
-    )
-
-    print(
-        f"Gemini model: {MODEL_NAME}"
-    )
-
-    print()
-
-    query = input(
-        "Ask Naarira AI: "
-    ).strip()
-
-    if not query:
-
-        print(
-            "No query provided."
+        results.append(
+            {
+                "name": str(message_name),
+                "data": parsed,
+            }
         )
 
-        return
+    return results
+
+
+# ============================================================
+# FIND ORDER RESULT
+# ============================================================
+
+def _find_order_result(
+    tool_results: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+
+    for item in tool_results:
+
+        tool_name = item["name"]
+
+        if not _is_order_tool(tool_name):
+            continue
+
+        data = item["data"]
+
+        if not isinstance(data, dict):
+            continue
+
+        # Only expose verified order information
+
+        verified = bool(
+            data.get("verified")
+        )
+
+        if not verified:
+
+            return {
+                "verified": False
+            }
+
+        order = {
+            "verified": True,
+            "order_number": data.get(
+                "order_number"
+            ),
+            "status": data.get(
+                "status"
+            ),
+            "message": data.get(
+                "message"
+            ),
+            "tracking": data.get(
+                "tracking"
+            ) or [],
+        }
+
+        return order
+
+    return None
+
+
+# ============================================================
+# FIND PRODUCTS
+# ============================================================
+
+def _find_product_results(
+    tool_results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+
+    products: List[Dict[str, Any]] = []
+
+    for item in tool_results:
+
+        tool_name = item["name"]
+
+        if not _is_product_tool(tool_name):
+            continue
+
+        data = item["data"]
+
+        # Common format:
+        # {"products": [...]}
+
+        if isinstance(data, dict):
+
+            candidate = data.get(
+                "products"
+            )
+
+            if isinstance(candidate, list):
+
+                for product in candidate:
+
+                    if isinstance(product, dict):
+                        products.append(product)
+
+                continue
+
+            # Single product result
+
+            if (
+                data.get("title")
+                or data.get("product_id")
+                or data.get("handle")
+            ):
+
+                products.append(data)
+
+                continue
+
+        # Direct list
+
+        if isinstance(data, list):
+
+            for product in data:
+
+                if isinstance(product, dict):
+                    products.append(product)
+
+    # Deduplicate
+
+    unique_products = []
+
+    seen = set()
+
+    for product in products:
+
+        key = (
+            product.get("product_id")
+            or product.get("shopify_product_id")
+            or product.get("url")
+            or product.get("handle")
+            or product.get("title")
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        unique_products.append(product)
+
+    return unique_products
+
+
+# ============================================================
+# NORMALIZE PRODUCT OBJECT
+# ============================================================
+
+def _normalize_product(
+    product: Dict[str, Any],
+) -> Dict[str, Any]:
+
+    """
+    Keep only frontend-safe product fields.
+    """
+
+    return {
+
+        "product_id": product.get(
+            "product_id"
+        ),
+
+        "shopify_product_id": product.get(
+            "shopify_product_id"
+        ),
+
+        "title": product.get(
+            "title"
+        ),
+
+        "handle": product.get(
+            "handle"
+        ),
+
+        "price": product.get(
+            "price"
+        ),
+
+        "image": (
+            product.get("image")
+            or product.get("image_url")
+            or product.get("featured_image")
+        ),
+
+        "url": product.get(
+            "url"
+        ),
+
+        "vendor": product.get(
+            "vendor"
+        ),
+
+        "availability": product.get(
+            "availability"
+        ),
+
+        "available": product.get(
+            "available"
+        ),
+
+        "description": product.get(
+            "description"
+        ),
+    }
+
+
+# ============================================================
+# EXTRACT FINAL TEXT ANSWER
+# ============================================================
+
+def _extract_final_answer(
+    messages: List[Any],
+) -> str:
+
+    # Walk backwards because the final AI message is normally
+    # the last meaningful assistant response.
+
+    for message in reversed(messages):
+
+        content = getattr(
+            message,
+            "content",
+            None,
+        )
+
+        if content is None:
+            continue
+
+        if isinstance(content, str):
+
+            text = content.strip()
+
+            if text:
+                return text
+
+        if isinstance(content, list):
+
+            text_parts = []
+
+            for part in content:
+
+                if isinstance(part, str):
+
+                    text_parts.append(part)
+
+                elif isinstance(part, dict):
+
+                    text_value = part.get(
+                        "text"
+                    )
+
+                    if text_value:
+                        text_parts.append(
+                            str(text_value)
+                        )
+
+            text = " ".join(
+                text_parts
+            ).strip()
+
+            if text:
+                return text
+
+    return (
+        "I'm sorry, I couldn't generate "
+        "a response right now."
+    )
+
+
+# ============================================================
+# CLEAN ANSWER
+# ============================================================
+
+def clean_ai_answer(
+    answer: str,
+) -> str:
+
+    if not answer:
+        return ""
+
+    # Remove markdown links
+
+    answer = re.sub(
+        r"\[([^\]]+)\]\((https?://[^)]+)\)",
+        r"\1",
+        answer,
+    )
+
+    # Remove raw Naarira URLs
+
+    answer = re.sub(
+        r"https?://(?:www\.)?naarira\.com/\S*",
+        "",
+        answer,
+        flags=re.IGNORECASE,
+    )
+
+    # Excess horizontal whitespace
+
+    answer = re.sub(
+        r"[ \t]+",
+        " ",
+        answer,
+    )
+
+    # Excess blank lines
+
+    answer = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        answer,
+    )
+
+    return answer.strip()
+
+
+# ============================================================
+# BUILD STRUCTURED RESPONSE
+# ============================================================
+
+def _build_structured_response(
+    user_message: str,
+    messages: List[Any],
+) -> Dict[str, Any]:
+
+    tool_names = _extract_tool_names(
+        messages
+    )
+
+    tool_results = _extract_tool_results(
+        messages
+    )
+
+    answer = _extract_final_answer(
+        messages
+    )
+
+    answer = clean_ai_answer(
+        answer
+    )
+
+    # --------------------------------------------------------
+    # ORDER RESULT
+    # --------------------------------------------------------
+
+    order_data = _find_order_result(
+        tool_results
+    )
+
+    if order_data is not None:
+
+        return {
+            "success": True,
+            "type": "order",
+            "answer": answer,
+            "products": [],
+            "order": order_data,
+            "meta": {
+                "route": "order",
+                "tools_used": tool_names,
+            },
+        }
+
+    # --------------------------------------------------------
+    # PRODUCT RESULTS
+    # --------------------------------------------------------
+
+    products = _find_product_results(
+        tool_results
+    )
+
+    if products:
+
+        normalized_products = [
+            _normalize_product(product)
+            for product in products
+        ]
+
+        return {
+            "success": True,
+            "type": "products",
+            "answer": answer,
+            "products": normalized_products,
+            "order": None,
+            "meta": {
+                "route": "products",
+                "tools_used": tool_names,
+            },
+        }
+
+    # --------------------------------------------------------
+    # POLICY
+    # --------------------------------------------------------
+
+    policy_used = any(
+        _is_policy_tool(name)
+        for name in tool_names
+    )
+
+    if policy_used:
+
+        return {
+            "success": True,
+            "type": "policy",
+            "answer": answer,
+            "products": [],
+            "order": None,
+            "meta": {
+                "route": "policy",
+                "tools_used": tool_names,
+            },
+        }
+
+    # --------------------------------------------------------
+    # GENERAL
+    # --------------------------------------------------------
+
+    return {
+        "success": True,
+        "type": "general",
+        "answer": answer,
+        "products": [],
+        "order": None,
+        "meta": {
+            "route": "general",
+            "tools_used": tool_names,
+        },
+    }
+
+
+# ============================================================
+# PUBLIC API FUNCTION — D1
+# ============================================================
+
+async def run_naarira_agent(
+    user_message: str,
+    session_id: str | None = None,
+) -> Dict[str, Any]:
+
+    """
+    Main function used by FastAPI.
+
+    Parameters:
+        user_message:
+            Customer's message.
+
+        session_id:
+            Unique conversation/session identifier.
+
+    Returns:
+        Stable JSON-compatible dictionary.
+    """
+
+    message = str(
+        user_message or ""
+    ).strip()
+
+    # --------------------------------------------------------
+    # Validation
+    # --------------------------------------------------------
+
+    if not message:
+
+        return {
+            "success": False,
+            "type": "general",
+            "answer": "Please enter a message.",
+            "products": [],
+            "order": None,
+            "meta": {
+                "route": "validation",
+                "tools_used": [],
+                "session_id": session_id,
+            },
+        }
+
+    # --------------------------------------------------------
+    # Get cached agent
+    # --------------------------------------------------------
+
+    agent, mcp_client = await get_naarira_agent()
+
+    print("\n" + "=" * 70)
+    print("NAARIRA AGENT REQUEST")
+    print("=" * 70)
+
+    print(
+        f"Session ID: {session_id}"
+    )
+
+    print(
+        f"User: {message}"
+    )
+
+    # --------------------------------------------------------
+    # Agent execution
+    # --------------------------------------------------------
 
     try:
-
-        agent = await create_naarira_agent()
 
         result = await agent.ainvoke(
             {
                 "messages": [
                     {
                         "role": "user",
-                        "content": query,
+                        "content": message,
                     }
                 ]
             }
         )
 
-        print_agent_trace(
-            result
-        )
-
-        answer = clean_ai_answer(
-            extract_response(
-                result
-            )
-        )
-
-        products = (
-            extract_products_from_result(
-                result
-            )
-        )
-
-        products = normalize_products(
-            products
-        )
-
-        print()
-        print("=" * 70)
-        print("FINAL ANSWER")
-        print("=" * 70)
-
-        print(
-            answer
-        )
-
-        print()
-        print("=" * 70)
-        print("PRODUCTS")
-        print("=" * 70)
-
-        print(
-            json.dumps(
-                products,
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
-
     except Exception as exc:
 
-        print()
-        print("=" * 70)
-        print("TEST FAILED")
-        print("=" * 70)
+        print(
+            "\n❌ Agent execution failed"
+        )
 
         print(
             f"Error type: {type(exc).__name__}"
@@ -1633,6 +1241,171 @@ async def main():
         )
 
         traceback.print_exc()
+
+        raise
+
+    # --------------------------------------------------------
+    # Extract messages
+    # --------------------------------------------------------
+
+    messages = result.get(
+        "messages",
+        []
+    )
+
+    # --------------------------------------------------------
+    # Build structured response
+    # --------------------------------------------------------
+
+    structured = _build_structured_response(
+        user_message=message,
+        messages=messages,
+    )
+
+    # --------------------------------------------------------
+    # Add session ID
+    # --------------------------------------------------------
+
+    structured.setdefault(
+        "meta",
+        {}
+    )
+
+    structured["meta"]["session_id"] = (
+        session_id
+    )
+
+    # --------------------------------------------------------
+    # Logging
+    # --------------------------------------------------------
+
+    print("\n" + "=" * 70)
+    print("NAARIRA AGENT RESPONSE")
+    print("=" * 70)
+
+    print(
+        f"Route: "
+        f"{structured.get('meta', {}).get('route')}"
+    )
+
+    print(
+        f"Session ID: {session_id}"
+    )
+
+    print(
+        f"Answer:\n{structured.get('answer')}"
+    )
+
+    print(
+        f"Products returned: "
+        f"{len(structured.get('products', []))}"
+    )
+
+    print(
+        "\n" + "=" * 70
+    )
+
+    return structured
+
+
+# ============================================================
+# PHASE C TEST QUERIES
+# ============================================================
+
+TEST_QUERIES = [
+    "Show me sarees under 2000",
+    "What is your return policy?",
+    "How long does shipping take?",
+    "Do you offer exchanges?",
+    "How long does a refund take?",
+    "Where is my order?",
+    "Track order #1269",
+]
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+async def main():
+
+    print("\n")
+
+    print("#" * 70)
+    print("NAARIRA PHASE C — AGENT ROUTING TEST")
+    print("#" * 70)
+
+    try:
+
+        agent, mcp_client = (
+            await create_naarira_agent()
+        )
+
+        for index, query in enumerate(
+            TEST_QUERIES,
+            start=1,
+        ):
+
+            print("\n")
+
+            print("=" * 70)
+
+            print(
+                f"TEST {index}/{len(TEST_QUERIES)}"
+            )
+
+            print(
+                f"Query: {query}"
+            )
+
+            print("=" * 70)
+
+            result = await run_naarira_agent(
+                user_message=query,
+                session_id=f"local-test-{index}",
+            )
+
+            print(
+                "\nFINAL ANSWER:"
+            )
+
+            print(
+                result["answer"]
+            )
+
+            if result["products"]:
+
+                print(
+                    "\nPRODUCTS:"
+                )
+
+                for product in result[
+                    "products"
+                ]:
+
+                    print(
+                        f"- {product.get('title')}"
+                    )
+
+    except Exception as exc:
+
+        print("\n" + "!" * 70)
+
+        print(
+            "NAARIRA AGENT INITIALIZATION FAILED"
+        )
+
+        print(
+            f"Error type: {type(exc).__name__}"
+        )
+
+        print(
+            f"Error: {exc}"
+        )
+
+        traceback.print_exc()
+
+        print("!" * 70)
 
 
 # ============================================================
@@ -1643,6 +1416,4 @@ if __name__ == "__main__":
 
     import asyncio
 
-    asyncio.run(
-        main()
-    )
+    asyncio.run(main())

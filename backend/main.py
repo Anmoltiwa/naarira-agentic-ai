@@ -1,74 +1,75 @@
+# ============================================================
+# NAARIRA AGENTIC AI BACKEND
+# Phase D1 — Structured Chat API
+# ============================================================
+
+import logging
+import os
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from agent.naarira_agent import (
-    create_naarira_agent,
+    get_naarira_agent,
     run_naarira_agent,
 )
 
 
 # ============================================================
-# GLOBAL AGENT
+# LOGGING
 # ============================================================
 
-agent = None
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+logger = logging.getLogger("naarira")
 
 
 # ============================================================
-# APPLICATION LIFESPAN
+# APP LIFESPAN
 # ============================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Initialize the Naarira agent once when FastAPI starts.
-    """
 
-    global agent
+    logger.info("=" * 70)
+    logger.info("STARTING NAARIRA AI BACKEND")
+    logger.info("=" * 70)
 
-    print("=" * 60)
-    print("STARTING NAARIRA AI BACKEND")
-    print("=" * 60)
+    # --------------------------------------------------------
+    # Initialize agent once during application startup.
+    # --------------------------------------------------------
 
     try:
+        await get_naarira_agent()
 
-        print("\nInitializing Naarira Agent...")
+        logger.info("✓ Naarira agent initialized successfully")
 
-        agent = await create_naarira_agent()
+    except Exception as exc:
 
-        print(
-            "\nNaarira Agent initialized successfully."
+        # IMPORTANT:
+        # Do not prevent FastAPI from starting just because
+        # Gemini/MCP is temporarily unavailable.
+        #
+        # The request endpoint will surface the actual error.
+
+        logger.exception(
+            "Agent initialization failed: %s",
+            exc,
         )
 
-    except Exception as e:
-
-        print(
-            "\nFailed to initialize Naarira Agent:"
-        )
-
-        print(
-            f"{type(e).__name__}: {str(e)}"
-        )
-
-        # Keep FastAPI running so the health endpoint
-        # can still report that the agent failed.
-
-        agent = None
+    logger.info("=" * 70)
+    logger.info("NAARIRA BACKEND READY")
+    logger.info("=" * 70)
 
     yield
 
-    # --------------------------------------------------------
-    # Shutdown
-    # --------------------------------------------------------
-
-    print(
-        "\nShutting down Naarira AI backend..."
-    )
-
-    agent = None
+    logger.info("Shutting down Naarira backend...")
 
 
 # ============================================================
@@ -76,12 +77,12 @@ async def lifespan(app: FastAPI):
 # ============================================================
 
 app = FastAPI(
-    title="Naarira AI Shopping Agent",
+    title="Naarira Agentic AI",
     description=(
         "Agentic AI backend for Naarira using "
-        "LangGraph, RAG, MCP and Gemini."
+        "RAG, MCP, Gemini and PostgreSQL."
     ),
-    version="4.0.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -89,11 +90,6 @@ app = FastAPI(
 # ============================================================
 # CORS
 # ============================================================
-
-# Development configuration.
-#
-# Later, when deploying:
-# allow_origins=["https://naarira.com"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -109,44 +105,18 @@ app.add_middleware(
 # ============================================================
 
 class ChatRequest(BaseModel):
-    """
-    Request body for /api/chat
-    """
 
     message: str = Field(
         ...,
         min_length=1,
-        max_length=1000,
-        description="Customer's message.",
+        max_length=2000,
+        description="Customer message",
     )
 
-
-# ============================================================
-# PRODUCT RESPONSE MODEL
-# ============================================================
-
-class ProductResponse(BaseModel):
-
-    product_id: int | None = None
-
-    title: str
-
-    handle: str | None = None
-
-    category: str | None = None
-
-    url: str
-
-
-# ============================================================
-# CHAT RESPONSE MODEL
-# ============================================================
-
-class ChatResponse(BaseModel):
-
-    answer: str
-
-    products: list[ProductResponse]
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Optional frontend session identifier",
+    )
 
 
 # ============================================================
@@ -154,14 +124,13 @@ class ChatResponse(BaseModel):
 # ============================================================
 
 @app.get("/")
-def root():
+async def root():
 
     return {
-        "service": "Naarira AI Shopping Agent",
+        "success": True,
+        "service": "Naarira Agentic AI",
         "status": "running",
-        "version": "4.0.0",
-        "docs": "/docs",
-        "chat_endpoint": "/api/chat",
+        "version": "1.0.0",
     }
 
 
@@ -170,114 +139,74 @@ def root():
 # ============================================================
 
 @app.get("/health")
-def health():
+async def health():
 
     return {
-        "status": "ok",
-        "agent_initialized": agent is not None,
+        "success": True,
+        "status": "healthy",
+        "service": "naarira-agentic-ai",
     }
 
 
 # ============================================================
-# CHAT
+# CHAT API
 # ============================================================
 
-@app.post(
-    "/api/chat",
-    response_model=ChatResponse,
-)
+@app.post("/api/chat")
 async def chat(request: ChatRequest):
-
-    global agent
-
-    # --------------------------------------------------------
-    # Check agent
-    # --------------------------------------------------------
-
-    if agent is None:
-
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Naarira AI Agent is not initialized."
-            ),
-        )
-
     try:
-
-        print(
-            "\n" + "=" * 60
-        )
-
-        print(
-            "CHAT REQUEST"
-        )
-
-        print(
-            f"Message: {request.message}"
-        )
-
-        print(
-            "=" * 60
-        )
-
-        # ----------------------------------------------------
-        # Run LangGraph Agent
-        # ----------------------------------------------------
+        print("\n" + "=" * 60)
+        print("CHAT REQUEST")
+        print("message:", request.message)
+        print("session_id:", request.session_id)
+        print("=" * 60)
 
         result = await run_naarira_agent(
-            query=request.message,
-            agent=agent,
-            debug=True,
+            user_message=request.message,
+            session_id=request.session_id,
         )
 
-        # ----------------------------------------------------
-        # Return structured response
-        # ----------------------------------------------------
+        print("CHAT RESULT:", result)
 
-        response = {
-            "answer": result.get(
-                "answer",
-                "Sorry, I could not generate a response.",
-            ),
-            "products": result.get(
-                "products",
-                [],
-            ),
-        }
-
-        print(
-            "\nChat request completed."
-        )
-
-        print(
-            f"Products returned: "
-            f"{len(response['products'])}"
-        )
-
-        return response
+        return result
 
     except Exception as e:
+        import traceback
 
-        print(
-            "\n" + "=" * 60
-        )
+        print("\n❌ CHAT ERROR")
+        print("ERROR TYPE:", type(e).__name__)
+        print("ERROR:", str(e))
+        traceback.print_exc()
 
-        print(
-            "CHAT API ERROR"
-        )
+        return {
+            "success": False,
+            "type": "error",
+            "answer": "Sorry, something went wrong while processing your request.",
+            "products": [],
+            "order": None,
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": str(e),
+                "error_type": type(e).__name__,
+            },
+        }
 
-        print(
-            f"{type(e).__name__}: {str(e)}"
-        )
 
-        print(
-            "=" * 60
-        )
+# ============================================================
+# LOCAL RUN
+# ============================================================
 
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Failed to process the chat request."
-            ),
-        )
+if __name__ == "__main__":
+
+    import uvicorn
+
+    port = int(
+        os.getenv("PORT", "8000")
+    )
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=True,
+    )

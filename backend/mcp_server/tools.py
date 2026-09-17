@@ -424,3 +424,154 @@ def check_product_availability(
     finally:
 
         db.close()
+# ============================================================
+# 4. TRACK ORDER
+# ============================================================
+
+def track_order(
+    order_number: str,
+    phone: str,
+) -> dict:
+    """
+    Verify and track a Shopify order.
+    """
+
+    from shopify_client import (
+        get_order_for_tracking,
+    )
+
+    order_number = str(
+        order_number or ""
+    ).strip()
+
+    phone = str(
+        phone or ""
+    ).strip()
+
+    if not order_number:
+
+        return {
+            "verified": False,
+            "error": "Order number is required.",
+        }
+
+    if not phone:
+
+        return {
+            "verified": False,
+            "error": "Phone number is required.",
+        }
+
+    try:
+
+        order = get_order_for_tracking(
+            order_number=order_number,
+            phone=phone,
+        )
+
+    except Exception as exc:
+
+        print(
+            "Order tracking error:",
+            type(exc).__name__,
+            str(exc),
+        )
+
+        return {
+            "verified": False,
+            "error": (
+                "Unable to retrieve the order "
+                "right now. Please try again."
+            ),
+        }
+
+    if not order:
+
+        return {
+            "verified": False,
+            "error": (
+                "We could not verify an order "
+                "with that order number and phone number."
+            ),
+        }
+
+    tracking_items = []
+
+    for fulfillment in (
+        order.get(
+            "fulfillments"
+        )
+        or []
+    ):
+
+        for tracking in (
+            fulfillment.get(
+                "tracking"
+            )
+            or []
+        ):
+
+            tracking_items.append(
+                {
+                    "company": tracking.get(
+                        "company"
+                    ),
+                    "number": tracking.get(
+                        "number"
+                    ),
+                    "url": tracking.get(
+                        "url"
+                    ),
+                    "status": fulfillment.get(
+                        "status"
+                    ),
+                    "delivered_at": fulfillment.get(
+                        "delivered_at"
+                    ),
+                    "estimated_delivery_at": (
+                        fulfillment.get(
+                            "estimated_delivery_at"
+                        )
+                    ),
+                }
+            )
+
+    order_status = (
+        order.get(
+            "order_status"
+        )
+        or "UNKNOWN"
+    )
+
+    order_number_value = (
+        order.get(
+            "order_number"
+        )
+        or order_number
+    )
+
+    if tracking_items:
+
+        message = (
+            f"Your order {order_number_value} "
+            f"is currently "
+            f"{order_status.lower()}."
+        )
+
+    else:
+
+        message = (
+            f"Your order {order_number_value} "
+            f"is currently "
+            f"{order_status.lower()}, "
+            "but tracking information is not "
+            "available yet."
+        )
+
+    return {
+        "verified": True,
+        "order_number": order_number_value,
+        "status": order_status,
+        "message": message,
+        "tracking": tracking_items,
+    }

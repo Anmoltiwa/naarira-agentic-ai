@@ -1,0 +1,60 @@
+NAARIRA — FREQUENTLY ASKED QUESTIONS
+Canonical Knowledge Document
+Last verified: 15 September 2026
+Sources:
+- https://naarira.com/pages/faqs
+- https://naarira.com/pages/shipping-policy
+- https://naarira.com/pages/refund-policy
+- https://naarira.com/pages/contact
+
+Purpose
+This document contains concise customer-facing FAQ answers for the Naarira AI assistant.
+For policy-sensitive questions, the dedicated Shipping Policy and Return & Refund Policy are authoritative.
+
+Q: How long does shipping take?
+A: Orders are processed within 1–2 business days and standard delivery takes 5–7 business days.
+
+Q: Is shipping free?
+A: Free shipping is available on orders above ₹999.
+
+Q: How can I track my order?
+A: Once the order is dispatched, tracking details are shared through the registered email ID and contact number. A tracking link is also provided via email and SMS.
+
+Q: Can I change my shipping address?
+A: Yes. A shipping address can be updated before the order is dispatched. Contact Naarira support immediately to request a change.
+
+Q: What is Naarira's return policy?
+A: Customers may request a return within 7 days of receiving the order, subject to the return conditions.
+
+Q: What are the return conditions?
+A: The item must be unused and unworn, with original tags attached, and in original packaging.
+
+Q: Which items cannot be returned?
+A: Customized products, altered garments, gift cards, and clearance or final-sale items are non-returnable.
+
+Q: How long does a refund take?
+A: Approved refunds are processed within 5–7 business days after the return is received and passes quality inspection.
+
+Q: Where is my prepaid refund credited?
+A: Prepaid refunds are credited to the original payment method.
+
+Q: How are COD refunds processed?
+A: COD refunds are processed through a Cashfree payment link.
+
+Q: Do you offer exchanges?
+A: No. Naarira's dedicated Return & Refund Policy states that exchanges are not offered.
+
+Q: I received a damaged, defective, or incorrect item. What should I do?
+A: Contact Naarira within 24 hours of delivery and provide photos plus an unboxing video.
+
+Q: Can I cancel my order?
+A: Yes, but only before dispatch. Once the order has been shipped, cancellation cannot be accepted.
+
+Q: Where can I get help?
+A: Email care@naarira.com. Support hours are Monday–Saturday, 10 AM–6 PM IST.
+
+CANONICAL SOURCE PRIORITY
+1. Dedicated Return & Refund Policy for return/refund/exchange/cancellation questions.
+2. Dedicated Shipping Policy for shipping/delivery/tracking/address questions.
+3. FAQ page for general FAQ wording.
+If a general FAQ page conflicts with a dedicated policy page, use the dedicated policy page.
