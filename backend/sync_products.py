@@ -8,6 +8,12 @@ from shopify_client import (
     fetch_all_products,
 )
 
+from sqlalchemy import text
+
+
+# =========================================================
+# OPTION HELPERS
+# =========================================================
 
 def extract_option(variant, option_name):
 
@@ -35,7 +41,37 @@ def extract_variant_options(variant):
     return size, color
 
 
-def sync_product(db, shopify_product):
+# =========================================================
+# DATETIME
+# =========================================================
+
+def parse_shopify_datetime(value):
+
+    if not value:
+        return None
+
+    try:
+
+        return datetime.fromisoformat(
+            value.replace(
+                "Z",
+                "+00:00"
+            )
+        )
+
+    except ValueError:
+
+        return None
+
+
+# =========================================================
+# PRODUCT SYNC
+# =========================================================
+
+def sync_product(
+    db,
+    shopify_product
+):
 
     shopify_product_id = shopify_product["id"]
 
@@ -48,6 +84,8 @@ def sync_product(db, shopify_product):
         .first()
     )
 
+    is_new = False
+
     if not product:
 
         product = Product(
@@ -56,24 +94,30 @@ def sync_product(db, shopify_product):
 
         db.add(product)
 
+        is_new = True
+
+    # -----------------------------------------------------
+    # Store Shopify values
+    # -----------------------------------------------------
+
     product.title = shopify_product["title"]
 
     product.handle = shopify_product["handle"]
 
-    product.description = shopify_product.get(
-        "description"
+    product.description = (
+        shopify_product.get("description")
     )
 
-    product.vendor = shopify_product.get(
-        "vendor"
+    product.vendor = (
+        shopify_product.get("vendor")
     )
 
-    product.product_type = shopify_product.get(
-        "productType"
+    product.product_type = (
+        shopify_product.get("productType")
     )
 
-    product.status = shopify_product.get(
-        "status"
+    product.status = (
+        shopify_product.get("status")
     )
 
     product.tags = ",".join(
@@ -81,32 +125,40 @@ def sync_product(db, shopify_product):
     )
 
     product.product_url = (
-    f"https://naarira.com/products/"
-    f"{shopify_product['handle']}"
-)
+        f"https://naarira.com/products/"
+        f"{shopify_product['handle']}"
+    )
 
-    featured_image = shopify_product.get(
-        "featuredImage"
+    featured_image = (
+        shopify_product.get("featuredImage")
     )
 
     if featured_image:
 
-        product.image_url = featured_image.get(
-            "url"
+        product.image_url = (
+            featured_image.get("url")
         )
 
-    product.created_at = parse_shopify_datetime(
-        shopify_product.get("createdAt")
+    product.created_at = (
+        parse_shopify_datetime(
+            shopify_product.get("createdAt")
+        )
     )
 
-    product.updated_at = parse_shopify_datetime(
-        shopify_product.get("updatedAt")
+    product.updated_at = (
+        parse_shopify_datetime(
+            shopify_product.get("updatedAt")
+        )
     )
 
     db.flush()
 
-    return product
+    return product, is_new
 
+
+# =========================================================
+# VARIANT SYNC
+# =========================================================
 
 def sync_variant(
     db,
@@ -114,7 +166,9 @@ def sync_variant(
     shopify_variant
 ):
 
-    shopify_variant_id = shopify_variant["id"]
+    shopify_variant_id = (
+        shopify_variant["id"]
+    )
 
     variant = (
         db.query(ProductVariant)
@@ -136,16 +190,16 @@ def sync_variant(
 
     variant.product_id = product.id
 
-    variant.title = shopify_variant.get(
-        "title"
+    variant.title = (
+        shopify_variant.get("title")
     )
 
-    variant.sku = shopify_variant.get(
-        "sku"
+    variant.sku = (
+        shopify_variant.get("sku")
     )
 
-    variant.price = shopify_variant.get(
-        "price"
+    variant.price = (
+        shopify_variant.get("price")
     )
 
     variant.compare_at_price = (
@@ -179,67 +233,130 @@ def sync_variant(
 
     if image:
 
-        variant.image_url = image.get(
-            "url"
+        variant.image_url = (
+            image.get("url")
         )
 
-    variant.created_at = parse_shopify_datetime(
-        shopify_variant.get("createdAt")
+    variant.created_at = (
+        parse_shopify_datetime(
+            shopify_variant.get("createdAt")
+        )
     )
 
-    variant.updated_at = parse_shopify_datetime(
-        shopify_variant.get("updatedAt")
+    variant.updated_at = (
+        parse_shopify_datetime(
+            shopify_variant.get("updatedAt")
+        )
     )
 
 
-def parse_shopify_datetime(value):
+# =========================================================
+# CHECK WHETHER PRODUCT CHANGED
+# =========================================================
 
-    if not value:
-        return None
+def product_has_changed(
+    existing_product,
+    shopify_product
+):
 
-    try:
+    if not existing_product:
 
-        return datetime.fromisoformat(
-            value.replace(
-                "Z",
-                "+00:00"
+        return True
+
+    shopify_updated_at = (
+        parse_shopify_datetime(
+            shopify_product.get("updatedAt")
+        )
+    )
+
+    local_updated_at = (
+        existing_product.updated_at
+    )
+
+    # If either timestamp is missing,
+    # treat product as changed.
+    if not shopify_updated_at:
+        return True
+
+    if not local_updated_at:
+        return True
+
+    # PostgreSQL datetime may be timezone-naive.
+    # Normalize it to the Shopify timestamp timezone.
+    if (
+        local_updated_at.tzinfo is None
+        and shopify_updated_at.tzinfo is not None
+    ):
+
+        local_updated_at = (
+            local_updated_at.replace(
+                tzinfo=shopify_updated_at.tzinfo
             )
         )
 
-    except ValueError:
+    return (
+        shopify_updated_at
+        > local_updated_at
+    )
 
-        return None
 
+# =========================================================
+# MAIN SYNC
+# =========================================================
 
 def sync_products():
 
     print("=" * 60)
 
-    print("NAARIRA SHOPIFY → POSTGRESQL SYNC")
+    print(
+        "NAARIRA SHOPIFY → POSTGRESQL SYNC"
+    )
 
     print("=" * 60)
 
     print()
 
-    print("Creating database tables...")
+    # -----------------------------------------------------
+    # Database
+    # -----------------------------------------------------
+
+    print(
+        "Creating database tables..."
+    )
 
     Base.metadata.create_all(
         bind=engine
     )
 
-    print("Database ready.")
+    print(
+        "Database ready."
+    )
 
     print()
 
-    print("Authenticating with Shopify...")
+    # -----------------------------------------------------
+    # Shopify authentication
+    # -----------------------------------------------------
+
+    print(
+        "Authenticating with Shopify..."
+    )
 
     access_token = get_access_token()
 
-    print("Shopify authentication successful.")
+    print(
+        "Shopify authentication successful."
+    )
 
     print()
 
-    print("Fetching products...")
+    # -----------------------------------------------------
+    # Fetch products
+    # -----------------------------------------------------
+
+    print(
+        "Fetching products..."
+    )
 
     products = fetch_all_products(
         access_token
@@ -258,9 +375,16 @@ def sync_products():
 
     products_created = 0
     products_updated = 0
+    products_unchanged = 0
     variants_synced = 0
 
+    changed_product_ids = []
+
     try:
+
+        # =================================================
+        # PROCESS PRODUCTS
+        # =================================================
 
         for index, shopify_product in enumerate(
             products,
@@ -272,27 +396,68 @@ def sync_products():
                 f"{shopify_product['title']}"
             )
 
-            existing = (
+            shopify_product_id = (
+                shopify_product["id"]
+            )
+
+            # -------------------------------------------------
+            # Find existing local product BEFORE updating it
+            # -------------------------------------------------
+
+            existing_product = (
                 db.query(Product)
                 .filter(
                     Product.shopify_product_id
-                    == shopify_product["id"]
+                    == shopify_product_id
                 )
                 .first()
             )
 
-            if existing:
+            # -------------------------------------------------
+            # Determine change
+            # -------------------------------------------------
+
+            changed = product_has_changed(
+                existing_product,
+                shopify_product
+            )
+
+            if existing_product is None:
+
+                print(
+                    "  → NEW PRODUCT"
+                )
+
+                products_created += 1
+
+            elif changed:
+
+                print(
+                    "  → PRODUCT CHANGED"
+                )
 
                 products_updated += 1
 
             else:
 
-                products_created += 1
+                print(
+                    "  → PRODUCT UNCHANGED"
+                )
 
-            product = sync_product(
+                products_unchanged += 1
+
+            # -------------------------------------------------
+            # Sync product
+            # -------------------------------------------------
+
+            product, is_new = sync_product(
                 db,
                 shopify_product
             )
+
+            # -------------------------------------------------
+            # Sync variants
+            # -------------------------------------------------
 
             variant_edges = (
                 shopify_product
@@ -312,33 +477,100 @@ def sync_products():
 
                 variants_synced += 1
 
+            # -------------------------------------------------
+            # Remember products needing embeddings
+            # -------------------------------------------------
+
+            if changed:
+
+                changed_product_ids.append(
+                    product.id
+                )
+
+                print(
+                    f"  → Added to embedding queue: "
+                    f"{product.id}"
+                )
+
+        # =================================================
+        # COMMIT PRODUCT SYNC
+        # =================================================
+
         db.commit()
+
+        # =================================================
+        # SUMMARY
+        # =================================================
 
         print()
 
         print("=" * 60)
 
-        print("SYNC COMPLETED")
-
-        print("=" * 60)
-
         print(
-            f"Products fetched : {len(products)}"
-        )
-
-        print(
-            f"Products created : {products_created}"
-        )
-
-        print(
-            f"Products updated : {products_updated}"
-        )
-
-        print(
-            f"Variants synced  : {variants_synced}"
+            "SHOPIFY SYNC COMPLETED"
         )
 
         print("=" * 60)
+
+        print(
+            f"Products fetched     : "
+            f"{len(products)}"
+        )
+
+        print(
+            f"Products created     : "
+            f"{products_created}"
+        )
+
+        print(
+            f"Products changed     : "
+            f"{products_updated}"
+        )
+
+        print(
+            f"Products unchanged   : "
+            f"{products_unchanged}"
+        )
+
+        print(
+            f"Variants synced      : "
+            f"{variants_synced}"
+        )
+
+        print(
+            f"Embedding candidates : "
+            f"{len(changed_product_ids)}"
+        )
+
+        print("=" * 60)
+
+        # =================================================
+        # IMPORTANT
+        # =================================================
+
+        print()
+
+        print(
+            "Changed product IDs:"
+        )
+
+        print(
+            changed_product_ids
+        )
+
+        print()
+
+        print(
+            "Shopify → PostgreSQL sync finished."
+        )
+
+        print(
+            "Embedding generation will be handled separately."
+        )
+
+        print("=" * 60)
+
+        return changed_product_ids
 
     except Exception:
 
@@ -350,6 +582,10 @@ def sync_products():
 
         db.close()
 
+
+# =========================================================
+# MAIN
+# =========================================================
 
 if __name__ == "__main__":
 

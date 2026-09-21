@@ -32,3 +32,7 @@ Thumbs.db
 *.log
 naarira_ai_backup.dump
 *.dump
+knowledge_documents_data.sql
+
+naarira_local_backup.dump
+naarira_before_sync_changes.dump

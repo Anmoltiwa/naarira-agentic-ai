@@ -10,9 +10,9 @@ from database import SessionLocal
 from rag.documents import get_all_product_documents
 
 
-# ---------------------------------------------------------
-# Load environment variables
-# ---------------------------------------------------------
+# =========================================================
+# LOAD ENVIRONMENT VARIABLES
+# =========================================================
 
 load_dotenv()
 
@@ -24,31 +24,33 @@ if not GEMINI_API_KEY:
     )
 
 
-# ---------------------------------------------------------
-# Gemini Client
-# ---------------------------------------------------------
+# =========================================================
+# GEMINI CLIENT
+# =========================================================
 
 client = genai.Client(
     api_key=GEMINI_API_KEY
 )
 
 
-# ---------------------------------------------------------
-# Embedding Model
-# ---------------------------------------------------------
+# =========================================================
+# EMBEDDING MODEL
+# =========================================================
 
 EMBEDDING_MODEL = "gemini-embedding-001"
 
+EXPECTED_DIMENSION = 3072
 
-# ---------------------------------------------------------
-# Generate embedding
-# ---------------------------------------------------------
+
+# =========================================================
+# GENERATE EMBEDDING
+# =========================================================
 
 def generate_embedding(text_content: str):
 
     response = client.models.embed_content(
         model=EMBEDDING_MODEL,
-        contents=text_content
+        contents=text_content,
     )
 
     embedding = response.embeddings[0].values
@@ -56,39 +58,163 @@ def generate_embedding(text_content: str):
     return embedding
 
 
-# ---------------------------------------------------------
-# Convert embedding to PostgreSQL vector format
-# ---------------------------------------------------------
+# =========================================================
+# CONVERT TO PGVECTOR
+# =========================================================
 
 def vector_to_pgvector(embedding):
 
     return "[" + ",".join(
-        str(value) for value in embedding
+        str(value)
+        for value in embedding
     ) + "]"
 
 
-# ---------------------------------------------------------
-# Store embeddings in PostgreSQL
-# ---------------------------------------------------------
+# =========================================================
+# GET EXISTING EMBEDDING
+# =========================================================
 
-def store_product_embeddings():
+def get_existing_embedding(
+    db,
+    product_id,
+):
+
+    return db.execute(
+        text("""
+            SELECT
+                id,
+                content
+            FROM product_embeddings
+            WHERE product_id = :product_id
+        """),
+        {
+            "product_id": product_id
+        },
+    ).fetchone()
+
+
+# =========================================================
+# INSERT NEW EMBEDDING
+# =========================================================
+
+def insert_embedding(
+    db,
+    product_id,
+    content,
+    embedding_string,
+):
+
+    db.execute(
+        text("""
+            INSERT INTO product_embeddings
+            (
+                product_id,
+                content,
+                embedding
+            )
+            VALUES
+            (
+                :product_id,
+                :content,
+                CAST(:embedding AS vector)
+            )
+        """),
+        {
+            "product_id": product_id,
+            "content": content,
+            "embedding": embedding_string,
+        },
+    )
+
+
+# =========================================================
+# UPDATE EXISTING EMBEDDING
+# =========================================================
+
+def update_embedding(
+    db,
+    embedding_id,
+    content,
+    embedding_string,
+):
+
+    db.execute(
+        text("""
+            UPDATE product_embeddings
+            SET
+                content = :content,
+                embedding = CAST(:embedding AS vector),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = :embedding_id
+        """),
+        {
+            "embedding_id": embedding_id,
+            "content": content,
+            "embedding": embedding_string,
+        },
+    )
+
+
+# =========================================================
+# MAIN EMBEDDING SYNC
+# =========================================================
+
+def store_product_embeddings(
+    candidate_product_ids=None,
+):
 
     print("\n" + "=" * 60)
-    print("NAARIRA PRODUCT EMBEDDING GENERATION")
+    print("NAARIRA PRODUCT EMBEDDING SYNC")
     print("=" * 60)
+
+    # -----------------------------------------------------
+    # Get all product documents
+    # -----------------------------------------------------
 
     documents = get_all_product_documents()
 
-    print(f"\nProducts found: {len(documents)}")
+    print(
+        f"\nTotal product documents found: "
+        f"{len(documents)}"
+    )
 
     if not documents:
+
         print("No products found.")
+
         return
+
+    # -----------------------------------------------------
+    # Optional candidate filtering
+    # -----------------------------------------------------
+
+    if candidate_product_ids is not None:
+
+        candidate_product_ids = set(
+            candidate_product_ids
+        )
+
+        documents = [
+            document
+            for document in documents
+            if document["product_id"]
+            in candidate_product_ids
+        ]
+
+        print(
+            f"Embedding candidates: "
+            f"{len(documents)}"
+        )
+
+    # -----------------------------------------------------
+    # Database
+    # -----------------------------------------------------
 
     db = SessionLocal()
 
-    processed = 0
-    skipped = 0
+    created = 0
+    updated = 0
+    unchanged = 0
     failed = 0
 
     try:
@@ -96,92 +222,158 @@ def store_product_embeddings():
         for document in documents:
 
             product_id = document["product_id"]
+
             content = document["content"]
 
             print("\n" + "-" * 60)
-            print(f"Product ID: {product_id}")
-            print(f"Product: {content.splitlines()[0]}")
+
+            print(
+                f"Product ID: {product_id}"
+            )
+
+            print(
+                f"Product: "
+                f"{content.splitlines()[0]}"
+            )
 
             # -------------------------------------------------
-            # Check existing embedding BEFORE calling Gemini
+            # Check existing embedding
             # -------------------------------------------------
 
-            existing = db.execute(
-                text("""
-                    SELECT id
-                    FROM product_embeddings
-                    WHERE product_id = :product_id
-                """),
-                {
-                    "product_id": product_id
-                }
-            ).fetchone()
+            existing = get_existing_embedding(
+                db,
+                product_id,
+            )
+
+            # =================================================
+            # EXISTING EMBEDDING
+            # =================================================
 
             if existing:
 
+                embedding_id = existing[0]
+
+                existing_content = existing[1]
+
+                # ---------------------------------------------
+                # Product has NOT changed
+                # ---------------------------------------------
+
+                if existing_content == content:
+
+                    print(
+                        "Embedding unchanged."
+                    )
+
+                    print(
+                        "Skipping Gemini API."
+                    )
+
+                    unchanged += 1
+
+                    continue
+
+                # ---------------------------------------------
+                # Product content changed
+                # ---------------------------------------------
+
                 print(
-                    "Embedding already exists."
-                    " Skipping Gemini API."
+                    "Product content changed."
                 )
 
-                skipped += 1
-                continue
+                print(
+                    "Generating new embedding..."
+                )
+
+                operation = "update"
+
+            # =================================================
+            # NEW EMBEDDING
+            # =================================================
+
+            else:
+
+                print(
+                    "No embedding found."
+                )
+
+                print(
+                    "Generating new embedding..."
+                )
+
+                operation = "insert"
+
+                embedding_id = None
 
             # -------------------------------------------------
-            # Generate embedding
+            # Gemini
             # -------------------------------------------------
-
-            print("Generating new Gemini embedding...")
 
             try:
 
-                embedding = generate_embedding(content)
+                embedding = generate_embedding(
+                    content
+                )
 
             except errors.ClientError as e:
 
                 error_message = str(e)
 
                 print("\nGEMINI API ERROR")
+
                 print(error_message)
 
                 # ---------------------------------------------
-                # Handle quota exhaustion
+                # Quota exhausted
                 # ---------------------------------------------
 
-                if "429" in error_message or "RESOURCE_EXHAUSTED" in error_message:
-
-                    print("\n" + "=" * 60)
-                    print("GEMINI QUOTA EXHAUSTED")
-                    print("=" * 60)
+                if (
+                    "429" in error_message
+                    or "RESOURCE_EXHAUSTED"
+                    in error_message
+                ):
 
                     print(
-                        "\nEmbedding generation stopped safely."
+                        "\n"
+                        + "=" * 60
                     )
 
                     print(
-                        f"Last product not embedded: "
+                        "GEMINI QUOTA EXHAUSTED"
+                    )
+
+                    print(
+                        "=" * 60
+                    )
+
+                    print(
+                        "Stopping embedding sync safely."
+                    )
+
+                    print(
+                        f"Product not processed: "
                         f"{product_id}"
                     )
 
                     print(
-                        "\nExisting embeddings are safe."
-                    )
-
-                    print(
-                        "Run this script again when "
-                        "Gemini quota becomes available."
+                        "Already committed embeddings "
+                        "are safe."
                     )
 
                     break
 
                 # ---------------------------------------------
-                # Other Gemini errors
+                # Other Gemini error
                 # ---------------------------------------------
 
                 failed += 1
 
                 print(
-                    "Gemini error. Skipping this product."
+                    "Gemini error."
+                )
+
+                print(
+                    "Skipping this product."
                 )
 
                 continue
@@ -193,58 +385,70 @@ def store_product_embeddings():
             dimension = len(embedding)
 
             print(
-                f"Embedding dimension: {dimension}"
+                f"Embedding dimension: "
+                f"{dimension}"
             )
 
-            if dimension != 3072:
+            if dimension != EXPECTED_DIMENSION:
 
                 raise ValueError(
-                    f"Unexpected embedding dimension: "
-                    f"{dimension}. Expected 3072."
+                    "Unexpected embedding dimension: "
+                    f"{dimension}. "
+                    f"Expected "
+                    f"{EXPECTED_DIMENSION}."
                 )
 
             # -------------------------------------------------
-            # Convert to pgvector format
+            # Convert to pgvector
             # -------------------------------------------------
 
-            embedding_string = vector_to_pgvector(
-                embedding
+            embedding_string = (
+                vector_to_pgvector(
+                    embedding
+                )
             )
 
-            # -------------------------------------------------
-            # Insert embedding
-            # -------------------------------------------------
+            # =================================================
+            # UPDATE
+            # =================================================
 
-            db.execute(
-                text("""
-                    INSERT INTO product_embeddings
-                    (
-                        product_id,
-                        content,
-                        embedding
-                    )
-                    VALUES
-                    (
-                        :product_id,
-                        :content,
-                        CAST(:embedding AS vector)
-                    )
-                """),
-                {
-                    "product_id": product_id,
-                    "content": content,
-                    "embedding": embedding_string
-                }
-            )
+            if operation == "update":
 
-            db.commit()
+                update_embedding(
+                    db=db,
+                    embedding_id=embedding_id,
+                    content=content,
+                    embedding_string=embedding_string,
+                )
 
-            processed += 1
+                db.commit()
 
-            print(
-                f"Stored successfully "
-                f"({processed} new embedding)"
-            )
+                updated += 1
+
+                print(
+                    "✓ Embedding updated successfully."
+                )
+
+            # =================================================
+            # INSERT
+            # =================================================
+
+            else:
+
+                insert_embedding(
+                    db=db,
+                    product_id=product_id,
+                    content=content,
+                    embedding_string=embedding_string,
+                )
+
+                db.commit()
+
+                created += 1
+
+                print(
+                    "✓ Embedding created successfully."
+                )
 
             # -------------------------------------------------
             # Small delay
@@ -252,31 +456,43 @@ def store_product_embeddings():
 
             time.sleep(0.2)
 
-        # -----------------------------------------------------
-        # Final summary
-        # -----------------------------------------------------
+        # =====================================================
+        # FINAL SUMMARY
+        # =====================================================
 
         print("\n" + "=" * 60)
-        print("EMBEDDING PROCESS SUMMARY")
+
+        print(
+            "EMBEDDING SYNC SUMMARY"
+        )
+
         print("=" * 60)
 
         print(
-            f"\nNew embeddings created : {processed}"
+            f"New embeddings created : "
+            f"{created}"
         )
 
         print(
-            f"Existing embeddings    : {skipped}"
+            f"Embeddings updated     : "
+            f"{updated}"
         )
 
         print(
-            f"Failed products        : {failed}"
+            f"Embeddings unchanged   : "
+            f"{unchanged}"
+        )
+
+        print(
+            f"Failed products        : "
+            f"{failed}"
         )
 
         # -----------------------------------------------------
-        # Current database count
+        # Current DB count
         # -----------------------------------------------------
 
-        result = db.execute(
+        total = db.execute(
             text("""
                 SELECT COUNT(*)
                 FROM product_embeddings
@@ -284,16 +500,18 @@ def store_product_embeddings():
         ).scalar()
 
         print(
-            f"Total embeddings in DB : {result}"
+            f"Total embeddings in DB : "
+            f"{total}"
         )
 
-        print("\n" + "=" * 60)
+        print("=" * 60)
 
     except Exception as e:
 
         db.rollback()
 
         print("\nERROR:")
+
         print(str(e))
 
         raise
@@ -303,14 +521,18 @@ def store_product_embeddings():
         db.close()
 
 
-# ---------------------------------------------------------
-# Main
-# ---------------------------------------------------------
+# =========================================================
+# MAIN
+# =========================================================
 
 if __name__ == "__main__":
 
     print("=" * 60)
-    print("NAARIRA RAG - GEMINI EMBEDDINGS")
+
+    print(
+        "NAARIRA RAG - PRODUCT EMBEDDING SYNC"
+    )
+
     print("=" * 60)
 
     store_product_embeddings()
